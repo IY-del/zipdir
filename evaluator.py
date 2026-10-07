@@ -1,5 +1,6 @@
 """Runtime path evaluation and hierarchical RuleKind phagocytosis."""
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -100,6 +101,7 @@ def evaluate_path(
 
     # 3. Smart remapping with lazy resolution of exile '?'
     target = rescued_by.target
+    scope = rescued_by.scope
     if shallowest_excluded_ancestor is not None:
         ancestor = shallowest_excluded_ancestor
         sub_path = rel_path.relative_to(ancestor)
@@ -109,6 +111,7 @@ def evaluate_path(
             p_parent = ancestor.parent if ancestor.parent != PurePosixPath(".") else PurePosixPath()
             arc_rel = p_parent / sub_path if p_parent != PurePosixPath() else sub_path
         elif target.startswith("/"):
+            # Absolute destination relative to archive root
             dest_dir = PurePosixPath(target.lstrip("/"))
             arc_rel = dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
         elif target in ("..", "../"):
@@ -119,8 +122,15 @@ def evaluate_path(
             )
             arc_rel = p_parent / sub_path if p_parent != PurePosixPath() else sub_path
         else:
-            # Archive-root relative remapping (per question 1 user response)
-            dest_dir = PurePosixPath(target.lstrip("/"))
+            # Relative destination: relative to subdirectory scope if scoped, else ancestor.parent
+            if scope != PurePosixPath():
+                dest_dir = scope / target
+            else:
+                p_parent_str = (
+                    ancestor.parent.as_posix() if ancestor.parent != PurePosixPath(".") else ""
+                )
+                comb = os.path.normpath(os.path.join(p_parent_str, target)).lstrip("./")
+                dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
             arc_rel = dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
     else:
         if target in (".", "./"):
@@ -140,6 +150,7 @@ def evaluate_path(
                     else PurePosixPath(rel_path.name)
                 )
         elif target.startswith("/"):
+            # Absolute destination relative to archive root
             dest_dir = PurePosixPath(target.lstrip("/"))
             arc_rel = (
                 dest_dir / rel_path.name
@@ -158,8 +169,13 @@ def evaluate_path(
                 else PurePosixPath(rel_path.name)
             )
         else:
-            # Archive-root relative remapping (per question 1 user response)
-            dest_dir = PurePosixPath(target.lstrip("/"))
+            # Relative destination: relative to subdirectory scope if scoped, else rel_path.parent
+            if scope != PurePosixPath():
+                dest_dir = scope / target
+            else:
+                p_str = rel_path.parent.as_posix() if rel_path.parent != PurePosixPath(".") else ""
+                comb = os.path.normpath(os.path.join(p_str, target)).lstrip("./")
+                dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
             arc_rel = (
                 dest_dir / rel_path.name
                 if dest_dir != PurePosixPath()
