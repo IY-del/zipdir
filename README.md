@@ -134,7 +134,7 @@ alias zipd='zipdir'
 | `./!out/*.pdf` | 階層死守 (RESCUE, `./`) | `out` は除外するが、`out/` 配下の階層構造を完全に維持したまま PDF を救出 |
 | `dist!out/*.pdf` | スコープ相対リマップ | その `.zipignore` の配置階層を基準として `dist/` 配下へ救出・配置 |
 | `/dist!out/*.pdf` | ルート絶対リマップ | アーカイブの全体ルートを基準として `dist/` 配下へ救出・配置 |
-| `!dist!out/*.pdf` | 救出打消 (REDELETE) | 先行する `dist!out/*.pdf` による救出設定のみをピンポイントで打ち消して再除外 |
+| `!?/dist!out/*.pdf` | 救出打消 (REDELETE) | 先行する `dist!out/*.pdf` による救出設定のみをピンポイントで打ち消して再除外 |
 | `!!out/*.pdf` | 完全再除外 (REDELETE) | 先行する救出設定をすべて打ち消し、再び除外対象へ戻す |
 
 ---

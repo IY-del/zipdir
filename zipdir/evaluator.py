@@ -83,7 +83,15 @@ def evaluate_path(
                 if (
                     not r.target
                     or rescued_by is None
-                    or rescued_by.target.rstrip("/") == r.target.rstrip("/")
+                    or r.target
+                    in (
+                        rescued_by.target,
+                        rescued_by.target.lstrip("/"),
+                        rescued_by.target.rstrip("/"),
+                        f"?/{rescued_by.target}",
+                        rescued_by.target.removeprefix("?/"),
+                    )
+                    or (r.target == "?" and rescued_by.target in ("?", "?/"))
                 ):
                     rescued_by = None
                     excluded_by = r

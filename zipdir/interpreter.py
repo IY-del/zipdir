@@ -23,7 +23,13 @@ class RuleInterpreter:
         self.glob_compiler = glob_compiler or GlobExpression()
 
     def parse_components(self, line: str) -> ParsedRule | None:
-        """Parse raw line into 4-component AST node (ParsedRule)."""
+        """Parse raw line into 4-component AST node (ParsedRule).
+
+        Strict notation rules:
+        - 0 bangs: EXCLUDE ('pattern')
+        - 1 bang:  RESCUE ('{to}!{pattern}', './!{pattern}', '!{pattern}')
+        - 2 bangs: REDELETE - only '!!{pattern}' or '!?/{to}!{pattern}' / '!?/!{pattern}' permitted
+        """
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             return None
@@ -42,13 +48,24 @@ class RuleInterpreter:
             return None
 
         # Count of '!' marks determines RuleKind: 1 = RESCUE, 2 = REDELETE
-        bang_count = 2 if b1 else 1
-        kind = RuleKind(bang_count)
+        if b1:
+            # 2 bangs -> REDELETE
+            # Only allowed forms: !!pattern or !?/{to}!pattern / !?/!pattern
+            if to == "":
+                target = ""
+            elif to.startswith("?/"):
+                inner = to.removeprefix("?/").strip()
+                target = inner if inner else "?"
+            elif to == "?":
+                target = "?"
+            else:
+                return None
+            return ParsedRule(RuleKind.REDELETE, target, pattern)
 
+        # 1 bang -> RESCUE
         # Normalize shorthand: 1-bang rule without explicit {to} (!pattern) defaults to exile '?'
-        target = to if (to or kind == RuleKind.REDELETE) else "?"
-
-        return ParsedRule(kind, target, pattern)
+        target = to if to else "?"
+        return ParsedRule(RuleKind.RESCUE, target, pattern)
 
     def interpret(self, line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
         """Parse and compile a raw rule line into an IgnoreRule."""
@@ -79,7 +96,10 @@ def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRul
     - Rescue:     '{to}!{pattern}' (1 bang) with default destination '?' for '!{pattern}'
                   - './!{pattern}': keep original directory hierarchy (階層死守)
                   - '?/!{pattern}' or '!{pattern}': exile / lift out of excluded parent (亡命ルート)
-                  - '{dir}!{pattern}': remap to specified directory
-    - Re-delete:  '!{to}!{pattern}' or '!!{pattern}' (2 bangs, cancels rescue, re-excludes items)
+                  - '{dir}!{pattern}': remap to specified directory relative to scope
+                  - '/{dir}!{pattern}': remap to specified directory relative to archive root
+    - Re-delete:  2 bangs (cancels rescue, re-excludes items):
+                  - '!!{pattern}': cancel any prior rescue
+                  - '!?/{to}!{pattern}' or '!?/!{pattern}': cancel specific exile/rescue destination
     """
     return _DEFAULT_INTERPRETER.interpret(line, scope=scope)

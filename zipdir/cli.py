@@ -81,7 +81,8 @@ Rule syntax:
   - '?/!out/*.pdf'       # Rescue out/*.pdf escaping excluded folder to parent (亡命ルート)
   - '{to}!out/*.pdf'     # Rescue and move to {to} relative to scope (e.g. 'dist!out/*.pdf')
   - '/{to}!out/*.pdf'    # Rescue and move to {to} relative to archive root
-  - '!{to}!out/*.pdf'    # Re-delete previously rescued item (!{to}! cancels rescue, '!!' cancels any)
+  - '!!out/*.pdf'        # Re-delete previously rescued item (cancels any rescue)
+  - '!?/{to}!out/*.pdf'  # Re-delete previously rescued item targeting {to} (e.g. '!?/dist!out/*.pdf')
 
 Examples:
   zipdir                                  # Packages current directory to ../<dir>.zip

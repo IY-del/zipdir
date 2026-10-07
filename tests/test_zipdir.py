@@ -113,7 +113,7 @@ class TestRuleCompiler:
         assert r.pattern == "sub/doc.txt"
 
     def test_redelete_syntax(self) -> None:
-        """Re-delete syntax '!{to}!{pattern}' and '!!{pattern}'."""
+        """Re-delete syntax '!{to}!{pattern}' and '!!{pattern}' strictly requiring '!!' or '!?/'."""
         # General cancellation with !!
         r = compile_rule("!!out/draft.pdf")
         assert r is not None
@@ -121,24 +121,22 @@ class TestRuleCompiler:
         assert r.target == ""
         assert r.pattern == "out/draft.pdf"
 
-        # Targeted cancellations with !{to}!
-        r_dist = compile_rule("!dist!out/*.pdf")
+        # Targeted cancellations with !?/{to}!
+        r_dist = compile_rule("!?/dist!out/*.pdf")
         assert r_dist is not None
         assert r_dist.kind == RuleKind.REDELETE
         assert r_dist.target == "dist"
         assert r_dist.pattern == "out/*.pdf"
 
-        r_keep = compile_rule("!./!out/draft.pdf")
-        assert r_keep is not None
-        assert r_keep.kind == RuleKind.REDELETE
-        assert r_keep.target == "./"
-        assert r_keep.pattern == "out/draft.pdf"
-
         r_exile = compile_rule("!?/!out/draft.pdf")
         assert r_exile is not None
         assert r_exile.kind == RuleKind.REDELETE
-        assert r_exile.target == "?/"
+        assert r_exile.target == "?"
         assert r_exile.pattern == "out/draft.pdf"
+
+        # 2-bang rules without !?/ prefix are disallowed
+        assert compile_rule("!dist!out/*.pdf") is None
+        assert compile_rule("!./!out/draft.pdf") is None
 
     def test_escaped_exclamation(self) -> None:
         """Escaped exclamation mark should be treated as literal character."""
@@ -215,11 +213,11 @@ class TestPathEvaluation:
         assert matched is not None and matched.kind == RuleKind.RESCUE
 
     def test_redelete_cancels_specific_destination(self) -> None:
-        """'!dist!out/*.pdf' cancels a prior 'dist!out/*.pdf' rescue."""
+        """'!?/dist!out/*.pdf' cancels a prior 'dist!out/*.pdf' rescue."""
         rules = [
             compile_rule("out/") or pytest.fail("rule failed"),
             compile_rule("dist!out/*.pdf") or pytest.fail("rule failed"),
-            compile_rule("!dist!out/*.pdf") or pytest.fail("rule failed"),
+            compile_rule("!?/dist!out/*.pdf") or pytest.fail("rule failed"),
         ]
         is_exc, arc, matched = evaluate_path(PurePosixPath("out/report.pdf"), False, rules)
         assert is_exc
@@ -368,12 +366,16 @@ class TestInterpreterComponents:
         res_empty = interpreter.parse_components("!!out/draft.pdf")
         assert res_empty == ParsedRule(RuleKind.REDELETE, "", "out/draft.pdf")
 
-        # Specific {to} -> !{to}!pattern
-        res_target = interpreter.parse_components("!dist!out/*.pdf")
+        # Specific {to} starting with !?/ -> !?/{to}!pattern
+        res_target = interpreter.parse_components("!?/dist!out/*.pdf")
         assert res_target == ParsedRule(RuleKind.REDELETE, "dist", "out/*.pdf")
 
-        res_keep = interpreter.parse_components("!./!out/draft.pdf")
-        assert res_keep == ParsedRule(RuleKind.REDELETE, "./", "out/draft.pdf")
+        res_exile = interpreter.parse_components("!?/!out/draft.pdf")
+        assert res_exile == ParsedRule(RuleKind.REDELETE, "?", "out/draft.pdf")
+
+        # 2-bang rules without !?/ are disallowed
+        assert interpreter.parse_components("!dist!out/*.pdf") is None
+        assert interpreter.parse_components("!./!out/draft.pdf") is None
 
     def test_parse_components_rescue_and_shorthand_normalization(self) -> None:
         interpreter = RuleInterpreter()
@@ -485,17 +487,17 @@ class TestPhagocytosis:
         assert r is not None and r.target == "final"
 
     def test_targeted_redelete_only_eats_matching_target(self) -> None:
-        """!build!out/*.pdf does NOT eat dist!out/*.pdf, but !dist!out/*.pdf DOES."""
+        """!?/build!out/*.pdf does NOT eat dist!out/*.pdf, but !?/dist!out/*.pdf DOES."""
         rules = [
             compile_rule("out/") or pytest.fail("rule failed"),
             compile_rule("dist!out/*.pdf") or pytest.fail("rule failed"),
-            compile_rule("!build!out/*.pdf") or pytest.fail("rule failed"),
+            compile_rule("!?/build!out/*.pdf") or pytest.fail("rule failed"),
         ]
         exc1, arc1, _ = evaluate_path(PurePosixPath("out/report.pdf"), False, rules)
         assert not exc1
         assert arc1 == PurePosixPath("dist/report.pdf")
 
-        rules.append(compile_rule("!dist!out/*.pdf") or pytest.fail("rule failed"))
+        rules.append(compile_rule("!?/dist!out/*.pdf") or pytest.fail("rule failed"))
         exc2, arc2, r2 = evaluate_path(PurePosixPath("out/report.pdf"), False, rules)
         assert exc2
         assert r2 is not None and r2.kind == RuleKind.REDELETE
