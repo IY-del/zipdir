@@ -10,10 +10,12 @@ from zipdir.models import (
     ParsedRule,
     PresetModel,
     RuleKind,
+    ScopedRule,
 )
 from zipdir.packager import ZipPackager
 from zipdir.presets import (
     DEFAULT_PRESET_DIRS,
+    discover_sub_zipignores,
     load_presets,
     load_raw_zipignore_preset,
 )
@@ -28,9 +30,11 @@ __all__ = [
     "PresetModel",
     "RuleInterpreter",
     "RuleKind",
+    "ScopedRule",
     "ZipPackager",
     "app",
     "compile_rule",
+    "discover_sub_zipignores",
     "evaluate_path",
     "load_presets",
     "load_raw_zipignore_preset",

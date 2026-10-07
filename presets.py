@@ -3,7 +3,7 @@
 import os
 import sys
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from zipdir.models import PresetModel
 from zipdir.squeezer import squeeze_rules
@@ -107,7 +107,7 @@ def load_presets(preset_dirs: Sequence[Path] | None = None) -> dict[str, PresetM
                 inherited_desc = p_desc
 
         merged_rules.extend(rules)
-        merged_rules = squeeze_rules(merged_rules)
+        merged_rules = [r if isinstance(r, str) else r.rule for r in squeeze_rules(merged_rules)]
         return inherited_desc, merged_rules, src_file
 
     for name in raw_presets:
@@ -124,3 +124,19 @@ def load_presets(preset_dirs: Sequence[Path] | None = None) -> dict[str, PresetM
             print(f"zipdir: warning: failed to resolve preset '{name}': {e}", file=sys.stderr)
 
     return presets
+
+
+def discover_sub_zipignores(source: Path) -> list[tuple[PurePosixPath, Path]]:
+    """Discover all .zipignore files in subdirectories under source, sorted by depth."""
+    found: list[tuple[PurePosixPath, Path]] = []
+    for dirpath, dirnames, filenames in source.walk(follow_symlinks=False):
+        # Do not traverse VCS directories
+        dirnames[:] = [d for d in dirnames if d not in (".git", ".svn", ".hg")]
+        if dirpath == source:
+            continue
+        if ".zipignore" in filenames:
+            rel_dir = PurePosixPath(dirpath.relative_to(source).as_posix())
+            found.append((rel_dir, dirpath / ".zipignore"))
+    # Sort by depth (shallowest first), then path
+    found.sort(key=lambda item: (len(item[0].parts), item[0].as_posix()))
+    return found

@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +27,7 @@ class IgnoreRule:
     regex: re.Pattern[str]
     is_dir_only: bool
     has_slash: bool
+    scope: PurePosixPath = PurePosixPath()
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,13 @@ class ParsedRule:
     kind: RuleKind
     target: str
     pattern: str
+
+
+class ScopedRule(BaseModel):
+    """A rule line paired with its directory scope (relative to packaging source)."""
+
+    scope: PurePosixPath = Field(default_factory=PurePosixPath)
+    rule: str
 
 
 class PresetModel(BaseModel):
@@ -55,7 +63,7 @@ class PackagerConfig(BaseModel):
     output: Path
     name: str
     preset_name: str
-    rules: list[str] = Field(default_factory=list)
+    rules: list[str | ScopedRule] = Field(default_factory=list)
     compression: int = 6
     flat: bool = False
     dry_run: bool = False

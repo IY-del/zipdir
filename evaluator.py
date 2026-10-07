@@ -1,6 +1,5 @@
 """Runtime path evaluation and hierarchical RuleKind phagocytosis."""
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -35,7 +34,14 @@ def evaluate_path(
         anc = PurePosixPath(*parts[:k])
         anc_str = anc.as_posix()
         for r in rules:
-            if r.regex.search(anc_str):
+            if r.scope != PurePosixPath():
+                if not anc.is_relative_to(r.scope) or anc == r.scope:
+                    continue
+                match_str = anc.relative_to(r.scope).as_posix()
+            else:
+                match_str = anc_str
+
+            if r.regex.search(match_str):
                 if r.kind == RuleKind.EXCLUDE:
                     status.is_excluded = True
                     if status.shallowest_excluded_ancestor is None:
@@ -60,7 +66,14 @@ def evaluate_path(
     for r in rules:
         if r.is_dir_only and not is_dir:
             continue
-        if r.regex.search(posix_str):
+        if r.scope != PurePosixPath():
+            if not rel_path.is_relative_to(r.scope) or rel_path == r.scope:
+                continue
+            target_str = rel_path.relative_to(r.scope).as_posix()
+        else:
+            target_str = posix_str
+
+        if r.regex.search(target_str):
             if r.kind == RuleKind.RESCUE:
                 rescued_by = r
                 excluded_by = None
@@ -98,12 +111,16 @@ def evaluate_path(
         elif target.startswith("/"):
             dest_dir = PurePosixPath(target.lstrip("/"))
             arc_rel = dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
-        else:
-            p_parent_str = (
-                ancestor.parent.as_posix() if ancestor.parent != PurePosixPath(".") else ""
+        elif target in ("..", "../"):
+            p_parent = (
+                ancestor.parent.parent
+                if ancestor.parent.parent != PurePosixPath(".")
+                else PurePosixPath()
             )
-            comb = os.path.normpath(os.path.join(p_parent_str, target)).lstrip("./")
-            dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
+            arc_rel = p_parent / sub_path if p_parent != PurePosixPath() else sub_path
+        else:
+            # Archive-root relative remapping (per question 1 user response)
+            dest_dir = PurePosixPath(target.lstrip("/"))
             arc_rel = dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
     else:
         if target in (".", "./"):
@@ -129,10 +146,20 @@ def evaluate_path(
                 if dest_dir != PurePosixPath()
                 else PurePosixPath(rel_path.name)
             )
+        elif target in ("..", "../"):
+            p_parent = (
+                rel_path.parent.parent
+                if rel_path.parent.parent != PurePosixPath(".")
+                else PurePosixPath()
+            )
+            arc_rel = (
+                p_parent / rel_path.name
+                if p_parent != PurePosixPath()
+                else PurePosixPath(rel_path.name)
+            )
         else:
-            p_str = rel_path.parent.as_posix() if rel_path.parent != PurePosixPath(".") else ""
-            comb = os.path.normpath(os.path.join(p_str, target)).lstrip("./")
-            dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
+            # Archive-root relative remapping (per question 1 user response)
+            dest_dir = PurePosixPath(target.lstrip("/"))
             arc_rel = (
                 dest_dir / rel_path.name
                 if dest_dir != PurePosixPath()

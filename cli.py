@@ -7,9 +7,13 @@ from typing import Annotated
 
 import typer
 
-from zipdir.models import PackagerConfig, PresetModel
+from zipdir.models import PackagerConfig, PresetModel, ScopedRule
 from zipdir.packager import ZipPackager
-from zipdir.presets import load_presets, load_raw_zipignore_preset
+from zipdir.presets import (
+    discover_sub_zipignores,
+    load_presets,
+    load_raw_zipignore_preset,
+)
 from zipdir.squeezer import squeeze_rules
 from zipdir.ui import (
     color_bold,
@@ -244,11 +248,27 @@ def package(
             if "clean" in presets:
                 base_rules.extend(presets["clean"].rules)
 
-    # Squeeze: base preset rules -> local .zipignore rules -> CLI overrides (compile-time phagocytosis)
+    # 4-tier Python-like scoping resolution:
+    # 1. Preset (Built-in)
     keep_set = set(keep or [])
-    combined_raw = (
-        [p for p in base_rules if p not in keep_set] + local_rules + (exclude or []) + (rule or [])
-    )
+    tier1_rules: list[ScopedRule] = [ScopedRule(rule=p) for p in base_rules if p not in keep_set]
+
+    # 2. Root .zipignore (Global)
+    tier2_rules: list[ScopedRule] = [ScopedRule(rule=r) for r in local_rules]
+
+    # 3. Subdirectory .zipignores (Enclosing / Local, ordered by depth)
+    tier3_rules: list[ScopedRule] = []
+    sub_zipignores = discover_sub_zipignores(source)
+    for rel_dir, sub_file in sub_zipignores:
+        sub_model = load_raw_zipignore_preset(sub_file)
+        for r in sub_model.rules:
+            tier3_rules.append(ScopedRule(scope=rel_dir, rule=r))
+
+    # 4. Command arguments (CLI Overrides)
+    cli_rules: list[str] = (exclude or []) + (rule or [])
+    tier4_rules: list[ScopedRule] = [ScopedRule(rule=r) for r in cli_rules]
+
+    combined_raw: list[ScopedRule] = tier1_rules + tier2_rules + tier3_rules + tier4_rules
     combined_rules = squeeze_rules(combined_raw)
 
     resolved_output = resolve_output_path(source, archive_name, target_out_arg)

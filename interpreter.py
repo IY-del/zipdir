@@ -1,6 +1,7 @@
 """4-component pattern matching and rule interpretation."""
 
 import re
+from pathlib import PurePosixPath
 
 from zipdir.glob import GlobExpression
 from zipdir.models import IgnoreRule, ParsedRule, RuleKind
@@ -49,7 +50,7 @@ class RuleInterpreter:
 
         return ParsedRule(kind, target, pattern)
 
-    def interpret(self, line: str) -> IgnoreRule | None:
+    def interpret(self, line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
         """Parse and compile a raw rule line into an IgnoreRule."""
         parsed = self.parse_components(line)
         if parsed is None or not parsed.pattern:
@@ -65,13 +66,14 @@ class RuleInterpreter:
             regex=regex,
             is_dir_only=is_dir_only,
             has_slash=has_slash,
+            scope=scope,
         )
 
 
 _DEFAULT_INTERPRETER = RuleInterpreter()
 
 
-def compile_rule(line: str) -> IgnoreRule | None:
+def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
     """Parse a single rule using RuleInterpreter:
     - Exclude:    'pattern' (0 bangs)
     - Rescue:     '{to}!{pattern}' (1 bang) with default destination '?' for '!{pattern}'
@@ -80,4 +82,4 @@ def compile_rule(line: str) -> IgnoreRule | None:
                   - '{dir}!{pattern}': remap to specified directory
     - Re-delete:  '!{to}!{pattern}' or '!!{pattern}' (2 bangs, cancels rescue, re-excludes items)
     """
-    return _DEFAULT_INTERPRETER.interpret(line)
+    return _DEFAULT_INTERPRETER.interpret(line, scope=scope)

@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from zipdir.evaluator import evaluate_path
 from zipdir.interpreter import compile_rule
-from zipdir.models import PackagerConfig, RuleKind
+from zipdir.models import PackagerConfig, RuleKind, ScopedRule
 from zipdir.ui import (
     color_bold,
     color_cyan,
@@ -24,7 +24,14 @@ class ZipPackager:
 
     def __init__(self, config: PackagerConfig) -> None:
         self.config = config
-        self.compiled_rules = [r for line in config.rules if (r := compile_rule(line)) is not None]
+        self.compiled_rules = []
+        for item in config.rules:
+            if isinstance(item, ScopedRule):
+                if (r := compile_rule(item.rule, scope=item.scope)) is not None:
+                    self.compiled_rules.append(r)
+            elif isinstance(item, str):
+                if (r := compile_rule(item)) is not None:
+                    self.compiled_rules.append(r)
         self.rescued_files: list[tuple[str, str]] = []
         self.excluded_files: list[str] = []
 
@@ -40,10 +47,19 @@ class ZipPackager:
         for r in self.compiled_rules:
             if r.kind != RuleKind.RESCUE:
                 continue
-            if not r.has_slash:
-                return False
+            if r.scope != PurePosixPath():
+                # If rule is scoped inside rel_dir, it targets contents inside rel_dir
+                if r.scope == rel_dir or r.scope.is_relative_to(rel_dir):
+                    return False
+                # If rel_dir is inside r.scope, pattern might match inside rel_dir
+                if not rel_dir.is_relative_to(r.scope):
+                    continue
             clean_pat = r.pattern.lstrip("/")
-            if clean_pat.startswith(posix_str) or posix_str.startswith(clean_pat.split("*")[0]):
+            if r.scope != PurePosixPath():
+                full_pat = (r.scope / clean_pat).as_posix()
+            else:
+                full_pat = clean_pat
+            if full_pat.startswith(posix_str) or posix_str.startswith(full_pat.split("*")[0]):
                 return False
 
         return True
