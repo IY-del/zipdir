@@ -30,9 +30,13 @@ app = typer.Typer(
 )
 
 
-def resolve_output_path(source: Path, name: str, output_target: Path | None) -> Path:
+def resolve_output_path(
+    source: Path, name: str, output_target: Path | None, timestamp: bool = False
+) -> Path:
     """Resolve and normalize destination archive path (defaults to source.parent per Plan B)."""
-    default_filename = f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+    default_filename = (
+        f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.zip" if timestamp else f"{name}.zip"
+    )
     if output_target is None:
         target = source.parent / default_filename
     else:
@@ -65,7 +69,7 @@ def print_presets(presets: dict[str, PresetModel]) -> None:
 @app.command(
     epilog="""\
 Preset configuration:
-  Presets are loaded from ~/.dcfg/config/zipdir/presets/*.zipignore.
+  Presets are loaded from ~/.dcfg/config/zipdir/presets/*.zipignore or project presets/*.zipignore.
   Presets can extend existing presets using '# inherit: <name1>, <name2>'.
   To list available presets and their rules:
     zipdir --list-presets
@@ -75,15 +79,18 @@ Rule syntax:
   - '!out/*.pdf'         # Rescue out/*.pdf and lift to parent (shorthand for ?/!out/*.pdf)
   - './!out/*.pdf'       # Rescue out/*.pdf keeping original directory hierarchy (階層死守)
   - '?/!out/*.pdf'       # Rescue out/*.pdf escaping excluded folder to parent (亡命ルート)
-  - '{to}!out/*.pdf'     # Rescue and move to {to} relative to parent (e.g. 'dist!out/*.pdf')
+  - '{to}!out/*.pdf'     # Rescue and move to {to} relative to scope (e.g. 'dist!out/*.pdf')
+  - '/{to}!out/*.pdf'    # Rescue and move to {to} relative to archive root
   - '!{to}!out/*.pdf'    # Re-delete previously rescued item (!{to}! cancels rescue, '!!' cancels any)
 
 Examples:
-  zipdir                                  # Packages current directory to ../<dir>_<timestamp>.zip
+  zipdir                                  # Packages current directory to ../<dir>.zip
+  zipdir -t                               # Packages current directory with timestamp: ../<dir>_<timestamp>.zip
   zipdir final.zip                        # Packages current directory to ../final.zip
   zipdir report                           # Packages report/ with default 'clean' preset
   zipdir report final.zip --preset report # Packages report/ with 'report' preset
-  zipdir -o /tmp/                         # Outputs <name>_<timestamp>.zip inside /tmp/
+  zipdir -o /tmp/                         # Outputs <name>.zip inside /tmp/
+  zipdir -o /tmp/ -t                      # Outputs <name>_<timestamp>.zip inside /tmp/
   zipdir final.zip -f                     # Overwrite existing final.zip
   zipdir --dry-run                        # Preview archive contents without creating file
 """,
@@ -140,6 +147,14 @@ def package(
         str | None,
         typer.Option("--name", help="Archive root directory name and default filename prefix"),
     ] = None,
+    timestamp: Annotated[
+        bool,
+        typer.Option(
+            "-t",
+            "--timestamp",
+            help="Append timestamp to default output filename (e.g. <name>_<timestamp>.zip; default: False)",
+        ),
+    ] = False,
     flat: Annotated[
         bool,
         typer.Option("--flat", help="Omit enclosing top-level directory in ZIP"),
@@ -271,7 +286,7 @@ def package(
     combined_raw: list[ScopedRule] = tier1_rules + tier2_rules + tier3_rules + tier4_rules
     combined_rules = squeeze_rules(combined_raw)
 
-    resolved_output = resolve_output_path(source, archive_name, target_out_arg)
+    resolved_output = resolve_output_path(source, archive_name, target_out_arg, timestamp=timestamp)
 
     config = PackagerConfig(
         source=source,
