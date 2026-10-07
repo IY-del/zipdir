@@ -21,6 +21,7 @@ from zipdir import (
     load_raw_zipignore_preset,
     squeeze_rules,
 )
+from zipdir.cli import resolve_output_path
 
 
 # ==============================================================================
@@ -743,3 +744,49 @@ class TestScopedRules:
             assert "temp/drop.txt" not in members
             assert "src/private.py" not in members
             assert "readme.md" not in members
+
+
+# ==============================================================================
+# 7. Output Path Resolution Tests (Timestamp flag behavior)
+# ==============================================================================
+class TestOutputPathResolution:
+    """Verifies resolve_output_path with timestamp flag defaulting to False."""
+
+    def test_default_output_path_has_no_timestamp(self) -> None:
+        """When output_target is None and timestamp is False, output should be <name>.zip."""
+        source = Path("/tmp/my_project")
+        res = resolve_output_path(source, "my_project", None, timestamp=False)
+        assert res.name == "my_project.zip"
+        assert res.parent == Path("/tmp").resolve()
+
+    def test_output_path_with_timestamp(self) -> None:
+        """When timestamp is True, output should have _<YYYYMMDD_HHMMSS>.zip."""
+        source = Path("/tmp/my_project")
+        res = resolve_output_path(source, "my_project", None, timestamp=True)
+        assert res.name.startswith("my_project_")
+        assert res.name.endswith(".zip")
+        assert len(res.name) > len("my_project_.zip")
+
+    def test_output_dir_without_timestamp(self, tmp_path: Path) -> None:
+        """When output is an existing directory and timestamp is False, output is inside that dir with <name>.zip."""
+        source = Path("/tmp/my_project")
+        res = resolve_output_path(source, "my_project", tmp_path, timestamp=False)
+        assert res == tmp_path / "my_project.zip"
+
+    def test_output_dir_with_timestamp(self, tmp_path: Path) -> None:
+        """When output is an existing directory and timestamp is True, output is inside that dir with timestamp."""
+        source = Path("/tmp/my_project")
+        res = resolve_output_path(source, "my_project", tmp_path, timestamp=True)
+        assert res.parent == tmp_path
+        assert res.name.startswith("my_project_")
+        assert res.name.endswith(".zip")
+
+    def test_explicit_output_filename_ignores_timestamp(self) -> None:
+        """Explicit output file target preserves the provided filename regardless of timestamp flag."""
+        source = Path("/tmp/my_project")
+        explicit_target = Path("/tmp/custom_archive.zip")
+        expected = explicit_target.parent.resolve() / explicit_target.name
+        res1 = resolve_output_path(source, "my_project", explicit_target, timestamp=False)
+        assert res1 == expected
+        res2 = resolve_output_path(source, "my_project", explicit_target, timestamp=True)
+        assert res2 == expected
