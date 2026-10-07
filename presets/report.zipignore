@@ -1,0 +1,5 @@
+# description: Lifts out/*.pdf to archive root; excludes out/ directory
+# extends: clean
+
+out/
+!out/*.pdf

@@ -9,9 +9,10 @@ from zipdir.models import PresetModel
 from zipdir.squeezer import squeeze_rules
 
 DEFAULT_PRESET_DIRS: list[Path] = [
-    Path.home() / ".dcfg" / "config" / "zipdir" / "presets",
-    Path(__file__).resolve().parent.parent.parent / "config" / "zipdir" / "presets",
+    Path(__file__).resolve().parent.parent / "presets",
+    Path(__file__).resolve().parent / "presets",
     Path.home() / ".config" / "zipdir" / "presets",
+    Path.home() / ".dcfg" / "config" / "zipdir" / "presets",
 ]
 
 

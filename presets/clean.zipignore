@@ -1,0 +1,43 @@
+# description: Excludes OS metadata, VCS, editor configs, caches, environments, and secrets
+*.zipignore
+
+# OS & Filesystem Metadata
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# Version Control
+.git
+.svn
+.hg
+
+# Editors & IDEs
+*.swp
+*.swo
+*~
+.idea
+.vscode
+
+# Python caches & virtual environments
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.venv
+venv
+
+# Node & JavaScript dependencies
+node_modules
+
+# Environment & secrets
+.env
+.env.*
+*.env
+
+# Logs & Temporary files
+*.log
+*.tmp

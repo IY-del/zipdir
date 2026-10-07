@@ -1,0 +1,31 @@
+[project]
+name = "zipdir"
+version = "0.2.0"
+description = "Package a directory into a clean ZIP archive with .zipignore rules and smart path remapping"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7.0",
+    "pyyaml>=6.0.1",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+zipdir = "zipdir.cli:app"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.350",
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
