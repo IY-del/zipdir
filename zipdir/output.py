@@ -17,14 +17,14 @@ class ResolvedOutput:
 
 
 class OutputResolver:
-    """Resolves archive output paths according to prefix rules and collision fallback.
+    """Resolves archive output paths according to 3-tier prefix rules and collision fallback.
 
     Prefix conventions for `-o` / `output_target`:
     - `None` (omitted): Current working directory (`./<name>.zip`)
-    - `""` or `"?"` or `"?/"` (or bare `-o`): Source parent directory (`<source.parent>/<name>.zip`)
+    - `""` (bare `-o`): Source parent directory (`<source.parent>/<name>.zip`)
     - `"/..."` or `"~/..."`: Absolute path
     - `"./..."` or `"../..."` (or `"."`, `".."`): Current working directory relative path
-    - `"___"` or `"___/..."` (optionally prefixed with `?` or `?/`): Source parent relative path
+    - `"___"` or `"___/..."`: Source parent relative path
 
     Collision fallback:
     - When an explicit `.zip` filename is given (`-o foo.zip`), the filename is locked (no `-t` fallback).
@@ -44,7 +44,7 @@ class OutputResolver:
         self.timestamp_fn = timestamp_fn or (lambda: time.strftime("%Y%m%d_%H%M%S"))
 
     def normalize_cli_args(self, args: Sequence[str]) -> list[str]:
-        """Normalize CLI arguments so bare `-o` / `--output` defaults to `?` (source.parent)."""
+        """Normalize CLI arguments so bare `-o` / `--output` defaults to `""` (source.parent)."""
         normalized: list[str] = []
         after_double_dash = False
         i = 0
@@ -63,7 +63,7 @@ class OutputResolver:
             if arg in ("-o", "--output"):
                 normalized.append(arg)
                 if i + 1 >= n or args[i + 1].startswith("-"):
-                    normalized.append("?")
+                    normalized.append("")
                 i += 1
                 continue
             normalized.append(arg)
@@ -125,16 +125,13 @@ class OutputResolver:
 
     def _classify_target(self, source: Path, raw: str) -> tuple[Path, bool]:
         """Classify raw output string into (target_path, is_forced_dir) across 3 prefix tiers."""
-        if raw in ("", "?", "?/"):
+        if raw == "":
             return source.parent, True
         if raw.startswith("/") or raw == "~" or raw.startswith("~/"):
             return Path(raw).expanduser(), raw.endswith("/")
         if raw in (".", "..") or raw.startswith("./") or raw.startswith("../"):
             return self.cwd / raw, raw in (".", "..") or raw.endswith("/")
-
-        rel = raw.removeprefix("?/").removeprefix("?")
-        target_path = source.parent / rel if rel else source.parent
-        return target_path, not rel or raw.endswith("/")
+        return source.parent / raw, raw.endswith("/")
 
     def _build_dynamic_output(
         self,

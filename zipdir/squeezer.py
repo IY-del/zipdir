@@ -18,9 +18,9 @@ class RuleInterpreter(BaseRuleInterpreter):
     def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
         """Squeeze rule lines by pattern and scope with target-aware phagocytosis.
 
-        Unconditional rules (EXCLUDE, RESCUE, or '!!' REDELETE) eat any earlier rule with
-        the same (scope, pattern). Targeted REDELETE ('!?/{to}!pattern') eats an earlier
-        RESCUE rule only if its target matches; otherwise both rules are preserved.
+        EXCLUDE and RESCUE rules eat any earlier rule with the same (scope, pattern).
+        REDELETE ('!{to}!pattern' or '!!pattern') eats an earlier RESCUE rule only if its
+        target matches; otherwise both rules are preserved.
         """
         squeezed: list[str | ScopedRule] = []
         parsed_meta: list[ParsedRule] = []
@@ -41,7 +41,7 @@ class RuleInterpreter(BaseRuleInterpreter):
                 parsed_meta.append(parsed)
                 continue
 
-            if parsed.kind == RuleKind.REDELETE and parsed.target:
+            if parsed.kind == RuleKind.REDELETE:
                 matched_idx = self._find_matching_rescue_index(parsed.target, indices, parsed_meta)
                 if matched_idx is not None:
                     squeezed[matched_idx] = item
@@ -99,7 +99,7 @@ class RuleInterpreter(BaseRuleInterpreter):
                 parsed_meta.append(parsed)
                 continue
 
-            if parsed.kind == RuleKind.REDELETE and parsed.target:
+            if parsed.kind == RuleKind.REDELETE:
                 matched_idx = self._find_matching_rescue_index(parsed.target, indices, parsed_meta)
                 if matched_idx is not None:
                     staged[matched_idx] = entry
@@ -131,11 +131,9 @@ class RuleInterpreter(BaseRuleInterpreter):
     ) -> int | None:
         for idx in reversed(indices):
             candidate = parsed_meta[idx]
-            if candidate.kind == RuleKind.RESCUE and redelete_matches_rescue(
+            if candidate.kind in (RuleKind.RESCUE, RuleKind.REDELETE) and redelete_matches_rescue(
                 redelete_target, candidate.target
             ):
-                return idx
-            if candidate.kind == RuleKind.REDELETE and candidate.target == redelete_target:
                 return idx
         return None
 

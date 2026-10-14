@@ -28,8 +28,13 @@ class _AncestorStatus:
             self.is_excluded = False
             self.matched_rule = rule
         elif rule.kind == RuleKind.REDELETE:
-            self.is_excluded = True
-            self.matched_rule = rule
+            if (
+                self.matched_rule is None
+                or self.matched_rule.kind != RuleKind.RESCUE
+                or redelete_matches_rescue(rule.target, self.matched_rule.target)
+            ):
+                self.is_excluded = True
+                self.matched_rule = rule
 
 
 class PathEvaluator:
@@ -131,11 +136,10 @@ class PathEvaluator:
         rescued_by: IgnoreRule,
         shallowest_excluded_ancestor: PurePosixPath | None,
     ) -> PurePosixPath:
-        """Resolve destination archive path using 3-tier coordinate prefixes:
-        - `/___`: Archive-root absolute coordinate
-        - `.` / `./___` / `..` / `../___`: Hierarchy-preserving or parent-climbing coordinate
-        - `?` / `?/___`: Exile-anchor (`anchor_parent`) relative coordinate
-        - `___`: Scope-relative (or `anchor_parent`-relative at root) coordinate
+        """Resolve destination archive path using 3-tier prefix semantics:
+        - `/` (`/!`, `/{to}!`): Archive-root coordinate
+        - `.` / `./` / `..` / `../` (`./!`, `./{to}!`, `../!`): Source hierarchy / local scope coordinate
+        - omitted (`!`, `{to}!`): Exile destination (`shallowest_excluded_ancestor.parent`) coordinate
         """
         target = rescued_by.target
         scope = rescued_by.scope
@@ -154,19 +158,29 @@ class PathEvaluator:
             else rel_path.parent
         )
 
-        if target.startswith("./"):
+        if target.startswith("/"):
+            dest_dir = self._normalize_posix(PurePosixPath(target.lstrip("/")))
+        elif target.startswith("./"):
             rel_sub = target.removeprefix("./").strip("/")
             preserved_base = (
-                shallowest_excluded_ancestor
-                if shallowest_excluded_ancestor is not None
-                else rel_path.parent
+                scope
+                if scope != PurePosixPath()
+                else (
+                    shallowest_excluded_ancestor
+                    if shallowest_excluded_ancestor is not None
+                    else rel_path.parent
+                )
             )
             dest_dir = (
                 self._normalize_posix(preserved_base / rel_sub)
                 if rel_sub
                 else self._normalize_posix(preserved_base)
             )
-        elif target == "?" or target.startswith("?"):
+        elif target in ("..", "../") or target.startswith("../"):
+            dest_dir = self._climb_from_anchor(anchor_parent, target)
+        else:
+            if not has_ancestor and not target and rel_path.parent == PurePosixPath("."):
+                return rel_path
             exile_base = (
                 anchor_parent
                 if has_ancestor
@@ -176,20 +190,11 @@ class PathEvaluator:
                     else anchor_parent.parent
                 )
             )
-            rel_sub = target.removeprefix("?/").removeprefix("?").strip("/")
             dest_dir = (
-                self._normalize_posix(exile_base / rel_sub)
-                if rel_sub
+                self._normalize_posix(exile_base / target)
+                if target
                 else self._normalize_posix(exile_base)
             )
-        elif target in ("..", "../") or target.startswith("../"):
-            dest_dir = self._climb_from_anchor(anchor_parent, target)
-        elif target.startswith("/"):
-            dest_dir = self._normalize_posix(PurePosixPath(target.lstrip("/")))
-        elif scope != PurePosixPath():
-            dest_dir = self._normalize_posix(scope / target)
-        else:
-            dest_dir = self._normalize_posix(anchor_parent / target)
 
         if dest_dir == PurePosixPath("."):
             dest_dir = PurePosixPath()

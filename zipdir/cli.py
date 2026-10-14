@@ -15,7 +15,7 @@ from zipdir.ui import ConsoleReporter, color_yellow
 
 
 class ZipdirCommand(TyperCommand):
-    """Custom Typer command that normalizes bare `-o` / `--output` flags to `?` (source.parent)."""
+    """Custom Typer command that normalizes bare `-o` / `--output` flags to `""` (source.parent)."""
 
     def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
         normalized = OutputResolver().normalize_cli_args(args)
@@ -40,7 +40,7 @@ def print_presets(presets: dict[str, PresetModel]) -> None:
     epilog="""\
 Output path resolution (-o / positional output):
   - (omitted)            # Current directory: ./<name>.zip
-  - '-o' or '-o ?'       # Source parent directory: <source.parent>/<name>.zip
+  - '-o' (no value)      # Source parent directory: <source.parent>/<name>.zip
   - '-o ./___'           # Current directory relative: ./___
   - '-o ___'             # Source parent relative: <source.parent>/___
   - '-o /___', '-o ~/___'# Absolute path
@@ -50,12 +50,13 @@ Output path resolution (-o / positional output):
 
 Rule syntax (.zipignore):
   - 'out/'               # Exclude out/ directory
-  - '!out/*.pdf'         # Rescue out/*.pdf and lift to parent (shorthand for ?/!out/*.pdf)
+  - '!out/*.pdf'         # Rescue out/*.pdf and lift to exile destination (shallowest excluded parent)
+  - '{to}!out/*.pdf'     # Rescue and move to {to} relative to exile destination (e.g. 'dist!out/*.pdf')
   - './!out/*.pdf'       # Rescue out/*.pdf keeping original directory hierarchy (階層死守)
-  - '{to}!out/*.pdf'     # Rescue and move to {to} relative to scope (e.g. 'dist!out/*.pdf')
+  - './{to}!out/*.pdf'   # Rescue and move to {to} relative to original hierarchy / local scope
   - '/{to}!out/*.pdf'    # Rescue and move to {to} relative to archive root
-  - '!!out/*.pdf'        # Re-delete previously rescued item (cancels any rescue)
-  - '!?/{to}!out/*.pdf'  # Re-delete previously rescued item targeting {to}
+  - '!!out/*.pdf'        # Re-delete item rescued via '!out/*.pdf'
+  - '!{to}!out/*.pdf'    # Re-delete item rescued targeting {to} (e.g. '!dist!out/*.pdf', '!./!out/*.pdf')
 """,
 )
 def package(
@@ -102,7 +103,7 @@ def package(
         typer.Option(
             "-o",
             "--output",
-            help="Output path: ./___ (cwd), ___ or bare -o / ? (source.parent), /___ or ~/___ (abs)",
+            help="Output path: ./___ (cwd), ___ or bare -o (source.parent), /___ or ~/___ (abs)",
         ),
     ] = None,
     name: Annotated[

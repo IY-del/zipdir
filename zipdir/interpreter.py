@@ -15,19 +15,25 @@ from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
 RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$")
 
 
+def normalize_target(target: str) -> str:
+    """Normalize a rescue/redelete destination target into canonical form."""
+    stripped = target.strip()
+    if stripped == "":
+        return ""
+    if stripped in (".", "./"):
+        return "./"
+    if stripped in ("..", "../"):
+        return "../"
+    if stripped == "/":
+        return "/"
+    return stripped.rstrip("/")
+
+
 def redelete_matches_rescue(redelete_target: str, rescued_target: str | None) -> bool:
     """Check whether a REDELETE target cancels a given RESCUE target."""
-    if not redelete_target or rescued_target is None:
+    if rescued_target is None:
         return True
-    if redelete_target in (
-        rescued_target,
-        rescued_target.lstrip("/"),
-        rescued_target.rstrip("/"),
-        f"?/{rescued_target}",
-        rescued_target.removeprefix("?/"),
-    ):
-        return True
-    return redelete_target == "?" and rescued_target in ("?", "?/")
+    return normalize_target(redelete_target) == normalize_target(rescued_target)
 
 
 class RuleInterpreter:
@@ -41,10 +47,15 @@ class RuleInterpreter:
     def parse_components(self, line: str) -> ParsedRule | None:
         """Parse raw line into 4-component AST node (ParsedRule).
 
+        3-tier destination prefix rules for `{to}` in `[!]{to}!{pattern}`:
+        - `/` (`/!`, `/{to}!`): Archive root
+        - `./` or `../` (`./!`, `./{to}!`, `../!`): Original source / local scope hierarchy
+        - omitted (`!`, `{to}!`): Exile destination (shallowest excluded ancestor's parent)
+
         Strict notation rules:
-        - 0 bangs: EXCLUDE ('pattern')
-        - 1 bang:  RESCUE ('{to}!{pattern}', './!{pattern}', '!{pattern}')
-        - 2 bangs: REDELETE - only '!!{pattern}' or '!?/{to}!{pattern}' / '!?/!{pattern}' permitted
+        - 0 bangs: EXCLUDE (`{pattern}`)
+        - 1 bang:  RESCUE (`{to}!{pattern}`, `./!{pattern}`, `!{pattern}`)
+        - 2 bangs: REDELETE (`!{to}!{pattern}`, `!./!{pattern}`, `!!{pattern}`)
         """
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -59,23 +70,11 @@ class RuleInterpreter:
         b1 = m.group("b1")
         to = m.group("to").strip()
         pattern = m.group("pattern").strip()
-        if not pattern:
+        if not pattern or "?" in to:
             return None
 
-        if b1:
-            if to == "":
-                target = ""
-            elif to.startswith("?/"):
-                inner = to.removeprefix("?/").strip()
-                target = inner if inner else "?"
-            elif to == "?":
-                target = "?"
-            else:
-                return None
-            return ParsedRule(RuleKind.REDELETE, target, pattern)
-
-        target = to if to else "?"
-        return ParsedRule(RuleKind.RESCUE, target, pattern)
+        kind = RuleKind.REDELETE if b1 else RuleKind.RESCUE
+        return ParsedRule(kind, to, pattern)
 
     def interpret(self, line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
         """Parse and compile a raw rule line into an IgnoreRule."""
