@@ -1,8 +1,8 @@
-"""Preset definition, loading, and 4-tier cascade resolution."""
+"""Preset definition, loading, C3 linearization, and 4-tier cascade resolution."""
 
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from zipdir.models import PresetModel, ScopedRule
@@ -17,7 +17,7 @@ DEFAULT_PRESET_DIRS: list[Path] = [
 
 
 class PresetCatalog:
-    """Manages preset discovery, inheritance resolution, and 4-tier .zipignore rule cascading."""
+    """Manages preset discovery, C3 inheritance linearization, and 4-tier .zipignore rule cascading."""
 
     preset_dirs: list[Path]
     interpreter: RuleInterpreter
@@ -67,13 +67,13 @@ class PresetCatalog:
         )
 
     def load_all(self) -> dict[str, PresetModel]:
-        """Discover and load presets from configuration directories, resolving inheritance."""
+        """Discover and load presets from configuration directories, resolving inheritance via C3 linearization."""
         raw_presets = self._discover_raw_presets()
         presets: dict[str, PresetModel] = {}
 
         for name, raw_model in raw_presets.items():
             try:
-                desc, rules, src = self._resolve_preset_chain(name, raw_presets, [])
+                desc, rules, src = self._resolve_preset_chain(name, raw_presets)
                 presets[name] = PresetModel(
                     name=name,
                     description=desc,
@@ -88,6 +88,77 @@ class PresetCatalog:
                 )
 
         return presets
+
+    def linearize_presets(
+        self,
+        name: str,
+        raw_presets: Mapping[str, PresetModel],
+    ) -> list[str]:
+        """Return the base-to-derived rule application order for `name` using C3 linearization.
+
+        In `.zipignore`, `# inherit: p1, p2` declares `p1` as base and `p2` as override.
+        In MRO (most-specific first) terms, direct parents are ordered `[p2, p1]`, and the
+        resulting C3 MRO is reversed to yield the base-to-derived evaluation sequence.
+        """
+
+        def get_mro_parents(node: str) -> list[str]:
+            if node not in raw_presets:
+                raise ValueError(f"Preset '{node}' not found in configuration directories")
+            return list(reversed(raw_presets[node].extends))
+
+        mro = self._compute_c3_mro(name, get_mro_parents, [])
+        return list(reversed(mro))
+
+    def _compute_c3_mro(
+        self,
+        node: str,
+        get_mro_parents: Callable[[str], list[str]],
+        visiting: list[str],
+    ) -> list[str]:
+        """Compute C3 superclass linearization MRO (most-specific to least-specific)."""
+        if node in visiting:
+            cycle_path = " -> ".join([*visiting, node])
+            raise ValueError(f"Circular dependency in preset inheritance: {cycle_path}")
+
+        next_visiting = [*visiting, node]
+        parents = get_mro_parents(node)
+        if not parents:
+            return [node]
+
+        parent_mros = [self._compute_c3_mro(p, get_mro_parents, next_visiting) for p in parents]
+        merged = self._c3_merge([*parent_mros, list(parents)])
+        return [node, *merged]
+
+    def _c3_merge(self, sequences: list[list[str]]) -> list[str]:
+        """Standard C3 merge algorithm over non-empty MRO sequences."""
+        result: list[str] = []
+        active = [list(seq) for seq in sequences if seq]
+
+        while active:
+            candidate: str | None = None
+            for seq in active:
+                head = seq[0]
+                if all(head not in other[1:] for other in active):
+                    candidate = head
+                    break
+
+            if candidate is None:
+                raise ValueError(
+                    f"Inconsistent preset inheritance order (C3 linearization failed): {active}"
+                )
+
+            result.append(candidate)
+            next_active: list[list[str]] = []
+            for seq in active:
+                if seq[0] == candidate:
+                    rem = seq[1:]
+                    if rem:
+                        next_active.append(rem)
+                else:
+                    next_active.append(seq)
+            active = next_active
+
+        return result
 
     def _extract_preset_stem(self, file: Path) -> str:
         stem = file.name
@@ -123,78 +194,80 @@ class PresetCatalog:
         self,
         name: str,
         raw_presets: Mapping[str, PresetModel],
-        visited: list[str],
     ) -> tuple[str, list[str], Path | None]:
-        if name in visited:
-            raise ValueError(
-                f"Circular dependency in preset inheritance: {' -> '.join(visited)} -> {name}"
-            )
-        visited.append(name)
-
-        if name not in raw_presets:
-            raise ValueError(f"Preset '{name}' not found in configuration directories")
-
-        model = raw_presets[name]
+        order = self.linearize_presets(name, raw_presets)
         merged_rules: list[str] = []
-        inherited_desc = model.description
-        for parent in model.extends:
-            p_desc, p_rules, _ = self._resolve_preset_chain(parent, raw_presets, visited.copy())
-            merged_rules.extend(p_rules)
-            if not inherited_desc:
-                inherited_desc = p_desc
+        inherited_desc = raw_presets[name].description
 
-        merged_rules.extend(model.rules)
+        for node_name in order:
+            node_model = raw_presets[node_name]
+            merged_rules.extend(node_model.rules)
+            if not inherited_desc and node_model.description:
+                inherited_desc = node_model.description
+
         squeezed = self.interpreter.squeeze(merged_rules)
         final_rules = [r if isinstance(r, str) else r.rule for r in squeezed]
-        return inherited_desc, final_rules, model.source_path
+        return inherited_desc, final_rules, raw_presets[name].source_path
 
     def _resolve_extended_rules(
         self,
         extends: Sequence[str],
         base_dir: Path,
         loaded_presets: Mapping[str, PresetModel],
-        visited_files: set[Path] | None = None,
+        root_file: Path | None = None,
     ) -> list[str]:
-        """Resolve `# inherit:` / `# extends:` / `# include:` targets (presets or relative ignore files)."""
-        seen_files = set(visited_files) if visited_files is not None else set()
-        resolved_rules: list[str] = []
+        """Resolve `# inherit:` / `# extends:` / `# include:` targets using C3 linearization."""
+        raw_presets = self._discover_raw_presets()
+        for k, v in loaded_presets.items():
+            if k not in raw_presets:
+                raw_presets[k] = v
 
-        for target in extends:
-            if target in loaded_presets:
-                for r in loaded_presets[target].rules:
-                    if r not in resolved_rules:
-                        resolved_rules.append(r)
-                continue
+        models_by_key: dict[str, PresetModel] = dict(raw_presets)
+        base_dirs_by_key: dict[str, Path] = {
+            k: (v.source_path.parent if v.source_path is not None else base_dir)
+            for k, v in raw_presets.items()
+        }
 
-            expanded = Path(target).expanduser()
-            candidate = expanded if expanded.is_absolute() else (base_dir / expanded)
+        root_key = f"__file__:{root_file.resolve()}" if root_file is not None else "__root__"
+        models_by_key[root_key] = PresetModel(name=root_key, extends=list(extends), rules=[])
+        base_dirs_by_key[root_key] = base_dir
+
+        def resolve_parent_key(parent_ref: str, current_dir: Path) -> str | None:
+            if parent_ref in models_by_key:
+                return parent_ref
+            expanded = Path(parent_ref).expanduser()
+            candidate = expanded if expanded.is_absolute() else (current_dir / expanded)
             if candidate.is_file():
                 canon = candidate.resolve()
-                if canon in seen_files:
-                    raise ValueError(f"Circular dependency in ignore file inheritance: {candidate}")
-                next_seen = seen_files | {canon}
-                included_model = self.parse_file(canon)
-                if included_model.extends:
-                    parent_rules = self._resolve_extended_rules(
-                        included_model.extends,
-                        canon.parent,
-                        loaded_presets,
-                        next_seen,
-                    )
-                    for r in parent_rules:
-                        if r not in resolved_rules:
-                            resolved_rules.append(r)
-                for r in included_model.rules:
-                    if r not in resolved_rules:
-                        resolved_rules.append(r)
-                continue
-
+                file_key = f"__file__:{canon}"
+                if file_key not in models_by_key:
+                    models_by_key[file_key] = self.parse_file(canon)
+                    base_dirs_by_key[file_key] = canon.parent
+                return file_key
             print(
-                f"zipdir: warning: preset '{target}' declared in .zipignore not found",
+                f"zipdir: warning: preset '{parent_ref}' declared in .zipignore not found",
                 file=sys.stderr,
             )
+            return None
 
-        return resolved_rules
+        def get_mro_parents(node_key: str) -> list[str]:
+            model = models_by_key[node_key]
+            curr_dir = base_dirs_by_key.get(node_key, base_dir)
+            resolved_parents: list[str] = []
+            for p_ref in model.extends:
+                p_key = resolve_parent_key(p_ref, curr_dir)
+                if p_key is not None and p_key not in resolved_parents:
+                    resolved_parents.append(p_key)
+            return list(reversed(resolved_parents))
+
+        mro = self._compute_c3_mro(root_key, get_mro_parents, [])
+        eval_order = [k for k in reversed(mro) if k != root_key]
+
+        merged_rules: list[str] = []
+        for k in eval_order:
+            merged_rules.extend(models_by_key[k].rules)
+        squeezed = self.interpreter.squeeze(merged_rules)
+        return [r if isinstance(r, str) else r.rule for r in squeezed]
 
     def discover_sub_zipignores(self, source: Path) -> list[tuple[PurePosixPath, Path]]:
         """Discover all .zipignore files in subdirectories under source, sorted by depth."""
@@ -246,7 +319,7 @@ class PresetCatalog:
                             custom_model.extends,
                             preset_path.parent,
                             loaded_presets,
-                            {preset_path.resolve()},
+                            preset_path,
                         )
                     )
                     base_rules.extend(custom_model.rules)
@@ -262,7 +335,7 @@ class PresetCatalog:
                         local_extends,
                         source,
                         loaded_presets,
-                        {local_zipignore.resolve()} if local_zipignore.is_file() else None,
+                        local_zipignore if local_zipignore.is_file() else None,
                     )
                 )
             elif "clean" in loaded_presets:
@@ -277,7 +350,7 @@ class PresetCatalog:
                     local_extends,
                     source,
                     loaded_presets,
-                    {local_zipignore.resolve()},
+                    local_zipignore,
                 )
             )
         tier2_raw.extend(local_rules)
@@ -291,7 +364,7 @@ class PresetCatalog:
                     sub_model.extends,
                     sub_file.parent,
                     loaded_presets,
-                    {sub_file.resolve()},
+                    sub_file,
                 )
                 for r in inherited_sub_rules:
                     tier3_rules.append(ScopedRule(scope=rel_dir, rule=r))
