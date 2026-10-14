@@ -1,10 +1,11 @@
-"""4-component pattern matching and rule interpretation."""
+"""4-component pattern matching, rule compilation, and compile-time rule squeezing."""
 
 import re
+from collections.abc import Sequence
 from pathlib import PurePosixPath
 
 from zipdir.glob import GlobExpression
-from zipdir.models import IgnoreRule, ParsedRule, RuleKind
+from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
 
 # 4 components of rule syntax: [b1]{to}![pattern]
 # 1. b1: leading '!' (redelete flag)
@@ -15,9 +16,7 @@ RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$"
 
 
 class RuleInterpreter:
-    """Interprets .zipignore lines by matching the 4 components (!, {to}, !, {pattern})
-    and determining RuleKind directly by the count of '!' marks with shorthand normalization.
-    """
+    """Interprets, squeezes, and compiles .zipignore rules in a unified pipeline."""
 
     def __init__(self, glob_compiler: GlobExpression | None = None) -> None:
         self.glob_compiler = glob_compiler or GlobExpression()
@@ -38,7 +37,6 @@ class RuleInterpreter:
 
         m = RULE_COMPONENT_PATTERN.match(stripped)
         if not m:
-            # 0 bangs -> EXCLUDE
             return ParsedRule(RuleKind.EXCLUDE, "", stripped)
 
         b1 = m.group("b1")
@@ -47,10 +45,7 @@ class RuleInterpreter:
         if not pattern:
             return None
 
-        # Count of '!' marks determines RuleKind: 1 = RESCUE, 2 = REDELETE
         if b1:
-            # 2 bangs -> REDELETE
-            # Only allowed forms: !!pattern or !?/{to}!pattern / !?/!pattern
             if to == "":
                 target = ""
             elif to.startswith("?/"):
@@ -62,8 +57,6 @@ class RuleInterpreter:
                 return None
             return ParsedRule(RuleKind.REDELETE, target, pattern)
 
-        # 1 bang -> RESCUE
-        # Normalize shorthand: 1-bang rule without explicit {to} (!pattern) defaults to exile '?'
         target = to if to else "?"
         return ParsedRule(RuleKind.RESCUE, target, pattern)
 
@@ -72,11 +65,78 @@ class RuleInterpreter:
         parsed = self.parse_components(line)
         if parsed is None or not parsed.pattern:
             return None
+        return self._build_rule(line, parsed, scope)
 
+    def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
+        """Squeeze rule lines by pattern and scope: later rules with identical patterns
+        within the same scope eat earlier rules (compile-time phagocytosis).
+        """
+        squeezed: list[str | ScopedRule] = []
+        seen: dict[tuple[PurePosixPath, str], int] = {}
+        for item in rules:
+            scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
+            line = item.rule if isinstance(item, ScopedRule) else item
+            parsed = self.parse_components(line)
+            if parsed is None:
+                continue
+            key = (scope, parsed.pattern)
+            if key in seen:
+                squeezed[seen[key]] = item
+            else:
+                seen[key] = len(squeezed)
+                squeezed.append(item)
+        return squeezed
+
+    def compile_all(
+        self, rules: Sequence[str | ScopedRule | IgnoreRule], *, squeeze: bool = False
+    ) -> tuple[IgnoreRule, ...]:
+        """Compile a sequence of raw or scoped rules into IgnoreRule objects.
+
+        When `squeeze=True`, performs compile-time phagocytosis by (scope, pattern) in a
+        single pass without re-parsing rule strings.
+        """
+        if not squeeze:
+            compiled: list[IgnoreRule] = []
+            for item in rules:
+                if isinstance(item, IgnoreRule):
+                    compiled.append(item)
+                elif isinstance(item, ScopedRule):
+                    if (r := self.interpret(item.rule, scope=item.scope)) is not None:
+                        compiled.append(r)
+                elif (r := self.interpret(item)) is not None:
+                    compiled.append(r)
+            return tuple(compiled)
+
+        staged: list[tuple[str, ParsedRule, PurePosixPath] | IgnoreRule] = []
+        seen: dict[tuple[PurePosixPath, str], int] = {}
+
+        for item in rules:
+            if isinstance(item, IgnoreRule):
+                key = (item.scope, item.pattern)
+                entry: tuple[str, ParsedRule, PurePosixPath] | IgnoreRule = item
+            else:
+                scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
+                line = item.rule if isinstance(item, ScopedRule) else item
+                parsed = self.parse_components(line)
+                if parsed is None or not parsed.pattern:
+                    continue
+                key = (scope, parsed.pattern)
+                entry = (line, parsed, scope)
+
+            if key in seen:
+                staged[seen[key]] = entry
+            else:
+                seen[key] = len(staged)
+                staged.append(entry)
+
+        return tuple(
+            entry if isinstance(entry, IgnoreRule) else self._build_rule(*entry) for entry in staged
+        )
+
+    def _build_rule(self, raw: str, parsed: ParsedRule, scope: PurePosixPath) -> IgnoreRule:
         regex, is_dir_only, has_slash = self.glob_compiler.interpret(parsed.pattern)
-
         return IgnoreRule(
-            raw=line,
+            raw=raw,
             kind=parsed.kind,
             target=parsed.target,
             pattern=parsed.pattern,
@@ -87,19 +147,11 @@ class RuleInterpreter:
         )
 
 
-_DEFAULT_INTERPRETER = RuleInterpreter()
-
-
 def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
-    """Parse a single rule using RuleInterpreter:
-    - Exclude:    'pattern' (0 bangs)
-    - Rescue:     '{to}!{pattern}' (1 bang) with default destination '?' for '!{pattern}'
-                  - './!{pattern}': keep original directory hierarchy (階層死守)
-                  - '?/!{pattern}' or '!{pattern}': exile / lift out of excluded parent (亡命ルート)
-                  - '{dir}!{pattern}': remap to specified directory relative to scope
-                  - '/{dir}!{pattern}': remap to specified directory relative to archive root
-    - Re-delete:  2 bangs (cancels rescue, re-excludes items):
-                  - '!!{pattern}': cancel any prior rescue
-                  - '!?/{to}!{pattern}' or '!?/!{pattern}': cancel specific exile/rescue destination
-    """
-    return _DEFAULT_INTERPRETER.interpret(line, scope=scope)
+    """Compile a single .zipignore rule line into an IgnoreRule."""
+    return RuleInterpreter().interpret(line, scope=scope)
+
+
+def squeeze_rules(rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
+    """Squeeze rule lines by pattern and scope."""
+    return RuleInterpreter().squeeze(rules)

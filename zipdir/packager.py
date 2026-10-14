@@ -1,4 +1,4 @@
-"""Core packaging engine (direct-to-archive writer with pruning optimization)."""
+"""Core packaging engine (direct-to-archive writer with non-greedy pruning)."""
 
 import os
 import stat
@@ -7,62 +7,49 @@ import zipfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.evaluator import evaluate_path
-from zipdir.interpreter import compile_rule
-from zipdir.models import PackagerConfig, RuleKind, ScopedRule
-from zipdir.ui import (
-    color_bold,
-    color_cyan,
-    color_dim,
-    color_success,
-    color_yellow,
-)
+from zipdir.evaluator import PathEvaluator
+from zipdir.models import IgnoreRule, PackagerConfig, RuleKind
+from zipdir.ui import ConsoleReporter
 
 
 class ZipPackager:
-    """Processes rules and generates archives directly without unnecessary staging."""
+    """Traverses source directory using PathEvaluator and writes ZIP archives atomically."""
 
-    def __init__(self, config: PackagerConfig) -> None:
+    config: PackagerConfig
+    evaluator: PathEvaluator
+    reporter: ConsoleReporter
+    compiled_rules: list[IgnoreRule]
+    rescued_files: list[tuple[str, str]]
+    excluded_files: list[str]
+
+    def __init__(
+        self,
+        config: PackagerConfig,
+        evaluator: PathEvaluator | None = None,
+        reporter: ConsoleReporter | None = None,
+    ) -> None:
         self.config = config
-        self.compiled_rules = []
-        for item in config.rules:
-            if isinstance(item, ScopedRule):
-                if (r := compile_rule(item.rule, scope=item.scope)) is not None:
-                    self.compiled_rules.append(r)
-            elif isinstance(item, str):
-                if (r := compile_rule(item)) is not None:
-                    self.compiled_rules.append(r)
-        self.rescued_files: list[tuple[str, str]] = []
-        self.excluded_files: list[str] = []
+        self.evaluator = evaluator or PathEvaluator(config.rules)
+        self.reporter = reporter or ConsoleReporter()
+        self.compiled_rules = list(self.evaluator.rules)
+        self.rescued_files = []
+        self.excluded_files = []
 
-    def _should_prune_directory(self, rel_dir: PurePosixPath) -> bool:
-        """Check if an excluded directory has any active rescue rules that could target its contents.
-        If all rescue rules have been eaten by REDELETE or parent EXCLUDE, prune immediately!
-        """
-        posix_str = rel_dir.as_posix()
-        is_excluded, _, _ = evaluate_path(rel_dir, is_dir=True, rules=self.compiled_rules)
-        if not is_excluded:
-            return False
-
-        for r in self.compiled_rules:
-            if r.kind != RuleKind.RESCUE:
-                continue
-            if r.scope != PurePosixPath():
-                # If rule is scoped inside rel_dir, it targets contents inside rel_dir
-                if r.scope == rel_dir or r.scope.is_relative_to(rel_dir):
-                    return False
-                # If rel_dir is inside r.scope, pattern might match inside rel_dir
-                if not rel_dir.is_relative_to(r.scope):
-                    continue
-            clean_pat = r.pattern.lstrip("/")
-            if r.scope != PurePosixPath():
-                full_pat = (r.scope / clean_pat).as_posix()
-            else:
-                full_pat = clean_pat
-            if full_pat.startswith(posix_str) or posix_str.startswith(full_pat.split("*")[0]):
-                return False
-
-        return True
+    def _is_self_archive(self, file_path: Path) -> bool:
+        """Prevent packaging the target output archive or temporary staging files into itself."""
+        if file_path.name.startswith(".zipdir_") and file_path.name.endswith(".zip"):
+            return True
+        resolved = file_path.resolve()
+        output_resolved = self.config.output.resolve()
+        if resolved == output_resolved:
+            return True
+        # Also skip the base <name>.zip if output fell back to <name>_<timestamp>.zip in the same dir
+        if resolved.parent == output_resolved.parent and resolved.name == f"{self.config.name}.zip":
+            if output_resolved.name.startswith(
+                f"{self.config.name}_"
+            ) and output_resolved.name.endswith(".zip"):
+                return True
+        return False
 
     def collect_members(self) -> Iterator[tuple[Path, str]]:
         """Traverse source directory and yield (filesystem_path, arcname) pairs."""
@@ -73,7 +60,6 @@ class ZipPackager:
         for dirpath, dirnames, filenames in self.config.source.walk(follow_symlinks=False):
             rel_dir = dirpath.relative_to(self.config.source)
 
-            # Prune excluded directories that have no active rescue rules
             pruned_dirs: list[str] = []
             for d in dirnames:
                 full_d = dirpath / d
@@ -88,10 +74,14 @@ class ZipPackager:
 
                 d_rel = rel_dir / d if rel_dir != Path(".") else Path(d)
                 d_posix = PurePosixPath(d_rel.as_posix())
-                if self._should_prune_directory(d_posix):
+                if self.evaluator.should_prune(d_posix):
                     pruned_dirs.append(d)
-                    if d_posix.as_posix() not in self.excluded_files:
-                        self.excluded_files.append(d_posix.as_posix() + "/")
+                    entry_str = d_posix.as_posix() + "/"
+                    if (
+                        d_posix.as_posix() not in self.excluded_files
+                        and entry_str not in self.excluded_files
+                    ):
+                        self.excluded_files.append(entry_str)
 
             for d in pruned_dirs:
                 dirnames.remove(d)
@@ -101,6 +91,8 @@ class ZipPackager:
 
             for fname in filenames:
                 file_path = dirpath / fname
+                if self._is_self_archive(file_path):
+                    continue
                 try:
                     mode = os.lstat(file_path).st_mode
                     if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
@@ -111,21 +103,19 @@ class ZipPackager:
                 file_rel = rel_dir / fname if rel_dir != Path(".") else Path(fname)
                 file_posix = PurePosixPath(file_rel.as_posix())
 
-                is_exc, arc_rel, matched_rule = evaluate_path(
-                    file_posix, is_dir=False, rules=self.compiled_rules
-                )
-                if is_exc:
+                result = self.evaluator.evaluate(file_posix, is_dir=False)
+                if result.is_excluded:
                     if file_posix.as_posix() not in self.excluded_files:
                         self.excluded_files.append(file_posix.as_posix())
                     continue
 
-                if arc_rel is None:
+                if result.arc_path is None:
                     continue
 
-                if matched_rule is not None and matched_rule.kind == RuleKind.RESCUE:
-                    self.rescued_files.append((file_posix.as_posix(), arc_rel.as_posix()))
+                if result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE:
+                    self.rescued_files.append((file_posix.as_posix(), result.arc_path.as_posix()))
 
-                full_arcname = (prefix / arc_rel).as_posix()
+                full_arcname = (prefix / result.arc_path).as_posix()
                 yield file_path, full_arcname
 
     def write_archive(self, path: Path, entries: Sequence[tuple[Path, str]]) -> None:
@@ -157,13 +147,13 @@ class ZipPackager:
                 )
             if not output.parent.is_dir():
                 raise FileNotFoundError(f"Output parent directory does not exist: {output.parent}")
-            if output.is_relative_to(self.config.source):
-                raise ValueError("Output must be outside the source directory")
 
         entries = list(self.collect_members())
 
         if self.config.dry_run:
-            self._print_dry_run(entries)
+            self.reporter.print_dry_run(
+                self.config, entries, self.rescued_files, self.excluded_files
+            )
             return output
 
         fd, temp_file_str = tempfile.mkstemp(prefix=".zipdir_", suffix=".zip", dir=output.parent)
@@ -177,56 +167,7 @@ class ZipPackager:
         finally:
             temp_path.unlink(missing_ok=True)
 
-        self._print_summary(output, entries)
+        self.reporter.print_summary(
+            self.config, output, entries, self.rescued_files, self.excluded_files
+        )
         return output
-
-    def _print_dry_run(self, entries: Sequence[tuple[Path, str]]) -> None:
-        print(
-            f"\n{color_yellow('[DRY RUN]')} Resulting archive structure for {color_bold(self.config.output.name)}:"
-        )
-        print(f"  • Source:   {self.config.source}")
-        print(f"  • Preset:   {self.config.preset_name}")
-        print(f"  • Rules:    {len(self.config.rules)} rules\n")
-        if self.rescued_files:
-            print(color_cyan("Rescued / Remapped files (!):"))
-            for src, dst in self.rescued_files:
-                print(f"  ↑ {src} -> {dst}")
-        if self.excluded_files:
-            print(color_yellow("Excluded paths:"))
-            for ex in self.excluded_files:
-                print(f"  ✕ {ex}")
-        print(color_bold("Archive members:"))
-        for _, arcname in entries:
-            print(f"  + {arcname}")
-
-    def _print_summary(self, output: Path, entries: Sequence[tuple[Path, str]]) -> None:
-        file_count = sum(1 for item, arcname in entries if not arcname.endswith("/"))
-        dir_count = sum(1 for item, arcname in entries if arcname.endswith("/"))
-        size_str = self._format_size(output.stat().st_size)
-
-        print(
-            f"{color_success('✔')} Created archive: {color_bold(output.name)} {color_dim(f'({size_str})')}"
-        )
-        print(f"  {color_dim('Path:')}     {color_cyan(str(output))}")
-        print(
-            f"  {color_dim('Preset:')}   {self.config.preset_name} ({len(self.config.rules)} rules)"
-        )
-        print(f"  {color_dim('Members:')}  {file_count} files, {dir_count} directories")
-
-        if self.config.verbose:
-            if self.rescued_files:
-                print(f"\n{color_cyan('Rescued / Remapped files (!):')}")
-                for src, dst in self.rescued_files:
-                    print(f"  ↑ {src} -> {dst}")
-            if self.excluded_files:
-                print(f"{color_yellow('Excluded paths:')}")
-                for ex in self.excluded_files:
-                    print(f"  ✕ {ex}")
-
-    @staticmethod
-    def _format_size(num_bytes: int) -> str:
-        for unit in ["B", "KB", "MB", "GB"]:
-            if num_bytes < 1024.0:
-                return f"{num_bytes:.1f} {unit}" if unit != "B" else f"{num_bytes} B"
-            num_bytes /= 1024.0
-        return f"{num_bytes:.1f} TB"

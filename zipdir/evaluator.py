@@ -1,98 +1,115 @@
-"""Runtime path evaluation and hierarchical RuleKind phagocytosis."""
+"""Runtime path evaluation, smart remapping, and non-greedy directory pruning."""
 
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from zipdir.models import IgnoreRule, RuleKind
+from zipdir.interpreter import RuleInterpreter
+from zipdir.models import EvaluationResult, IgnoreRule, RuleKind, ScopedRule
 
 
 @dataclass
-class _PathStatus:
+class _AncestorStatus:
     is_excluded: bool = False
     shallowest_excluded_ancestor: PurePosixPath | None = None
     matched_rule: IgnoreRule | None = None
 
 
-def evaluate_path(
-    rel_path: PurePosixPath,
-    is_dir: bool,
-    rules: Sequence[IgnoreRule],
-) -> tuple[bool, PurePosixPath | None, IgnoreRule | None]:
-    """Evaluate path against rules, returning (is_excluded, arc_rel_path, matched_rule).
-    Implements RuleKind phagocytosis (貪食):
-    - Ancestors to descendants: EXCLUDE excludes subtree; RESCUE eats EXCLUDE for subtree; REDELETE eats RESCUE.
-    - Path-level rules: RESCUE eats EXCLUDE/REDELETE; REDELETE eats matching RESCUE; EXCLUDE eats RESCUE.
-    - Lazy exile route ('?'): dynamically resolves exile parent relative to shallowest excluded ancestor.
-    """
-    posix_str = rel_path.as_posix()
-    parts = rel_path.parts
+class PathEvaluator:
+    """Evaluates relative paths against compiled .zipignore rules with hierarchical phagocytosis."""
 
-    # 1. Hierarchical ancestor evaluation (top-down engulfment)
-    status = _PathStatus()
-    for k in range(1, len(parts)):
-        anc = PurePosixPath(*parts[:k])
-        anc_str = anc.as_posix()
-        for r in rules:
+    rules: tuple[IgnoreRule, ...]
+
+    def __init__(
+        self,
+        rules: Sequence[IgnoreRule | str | ScopedRule] = (),
+        interpreter: RuleInterpreter | None = None,
+    ) -> None:
+        if all(isinstance(r, IgnoreRule) for r in rules):
+            self.rules = tuple(r for r in rules if isinstance(r, IgnoreRule))
+        else:
+            compiler = interpreter or RuleInterpreter()
+            self.rules = compiler.compile_all(rules)
+
+    def evaluate(self, rel_path: PurePosixPath, is_dir: bool = False) -> EvaluationResult:
+        """Evaluate path against rules, returning EvaluationResult(is_excluded, arc_path, matched_rule)."""
+        status = self._evaluate_ancestors(rel_path.parts)
+        is_excluded, excluded_by, rescued_by = self._evaluate_target(rel_path, is_dir, status)
+
+        if is_excluded:
+            return EvaluationResult(True, None, excluded_by)
+        if rescued_by is None:
+            return EvaluationResult(False, rel_path, None)
+
+        arc_rel = self._remap_path(rel_path, rescued_by, status.shallowest_excluded_ancestor)
+        return EvaluationResult(False, arc_rel, rescued_by)
+
+    def should_prune(self, rel_dir: PurePosixPath) -> bool:
+        """Check if an excluded directory has any active rescue rules that could target its contents."""
+        if not self.evaluate(rel_dir, is_dir=True).is_excluded:
+            return False
+
+        posix_str = rel_dir.as_posix()
+        for r in self.rules:
+            if r.kind != RuleKind.RESCUE:
+                continue
             if r.scope != PurePosixPath():
-                if not anc.is_relative_to(r.scope) or anc == r.scope:
+                if r.scope == rel_dir or r.scope.is_relative_to(rel_dir):
+                    return False
+                if not rel_dir.is_relative_to(r.scope):
                     continue
-                match_str = anc.relative_to(r.scope).as_posix()
-            else:
-                match_str = anc_str
+            clean_pat = r.pattern.lstrip("/")
+            full_pat = (r.scope / clean_pat).as_posix() if r.scope != PurePosixPath() else clean_pat
+            if full_pat.startswith(posix_str) or posix_str.startswith(full_pat.split("*")[0]):
+                return False
 
-            if r.regex.search(match_str):
+        return True
+
+    def _evaluate_ancestors(self, parts: tuple[str, ...]) -> _AncestorStatus:
+        status = _AncestorStatus()
+        for k in range(1, len(parts)):
+            anc = PurePosixPath(*parts[:k])
+            anc_str = anc.as_posix()
+            for r in self.rules:
+                match_str = self._scoped_target(anc, anc_str, r.scope)
+                if match_str is None or not r.regex.search(match_str):
+                    continue
                 if r.kind == RuleKind.EXCLUDE:
                     status.is_excluded = True
                     if status.shallowest_excluded_ancestor is None:
                         status.shallowest_excluded_ancestor = anc
                     status.matched_rule = r
                 elif r.kind == RuleKind.RESCUE:
-                    # RESCUE eats EXCLUDE for this ancestor and its descendants
                     status.is_excluded = False
                     status.matched_rule = r
                 elif r.kind == RuleKind.REDELETE:
-                    # REDELETE eats RESCUE for this ancestor and its descendants
                     status.is_excluded = True
                     status.matched_rule = r
+        return status
 
-    # 2. File / target level evaluation (eats inherited ancestor status)
-    is_excluded = status.is_excluded
-    shallowest_excluded_ancestor = status.shallowest_excluded_ancestor
-    matched_rule = status.matched_rule
-    rescued_by = matched_rule if (matched_rule and matched_rule.kind == RuleKind.RESCUE) else None
-    excluded_by = matched_rule if is_excluded else None
+    def _evaluate_target(
+        self, rel_path: PurePosixPath, is_dir: bool, status: _AncestorStatus
+    ) -> tuple[bool, IgnoreRule | None, IgnoreRule | None]:
+        posix_str = rel_path.as_posix()
+        is_excluded = status.is_excluded
+        matched = status.matched_rule
+        rescued_by = matched if (matched and matched.kind == RuleKind.RESCUE) else None
+        excluded_by = matched if is_excluded else None
 
-    for r in rules:
-        if r.is_dir_only and not is_dir:
-            continue
-        if r.scope != PurePosixPath():
-            if not rel_path.is_relative_to(r.scope) or rel_path == r.scope:
+        for r in self.rules:
+            if r.is_dir_only and not is_dir:
                 continue
-            target_str = rel_path.relative_to(r.scope).as_posix()
-        else:
-            target_str = posix_str
+            target_str = self._scoped_target(rel_path, posix_str, r.scope)
+            if target_str is None or not r.regex.search(target_str):
+                continue
 
-        if r.regex.search(target_str):
             if r.kind == RuleKind.RESCUE:
                 rescued_by = r
                 excluded_by = None
                 is_excluded = False
             elif r.kind == RuleKind.REDELETE:
-                if (
-                    not r.target
-                    or rescued_by is None
-                    or r.target
-                    in (
-                        rescued_by.target,
-                        rescued_by.target.lstrip("/"),
-                        rescued_by.target.rstrip("/"),
-                        f"?/{rescued_by.target}",
-                        rescued_by.target.removeprefix("?/"),
-                    )
-                    or (r.target == "?" and rescued_by.target in ("?", "?/"))
-                ):
+                if self._redelete_matches_rescue(r.target, rescued_by):
                     rescued_by = None
                     excluded_by = r
                     is_excluded = True
@@ -101,93 +118,82 @@ def evaluate_path(
                 rescued_by = None
                 is_excluded = True
 
-    if is_excluded:
-        return True, None, excluded_by
+        return is_excluded, excluded_by, rescued_by
 
-    if rescued_by is None:
-        return False, rel_path, None
-
-    # 3. Smart remapping with lazy resolution of exile '?'
-    target = rescued_by.target
-    scope = rescued_by.scope
-    if shallowest_excluded_ancestor is not None:
-        ancestor = shallowest_excluded_ancestor
-        sub_path = rel_path.relative_to(ancestor)
+    def _remap_path(
+        self,
+        rel_path: PurePosixPath,
+        rescued_by: IgnoreRule,
+        shallowest_excluded_ancestor: PurePosixPath | None,
+    ) -> PurePosixPath:
+        target = rescued_by.target
+        scope = rescued_by.scope
         if target in (".", "./"):
-            arc_rel = rel_path
-        elif target in ("?", "?/"):
-            p_parent = ancestor.parent if ancestor.parent != PurePosixPath(".") else PurePosixPath()
-            arc_rel = p_parent / sub_path if p_parent != PurePosixPath() else sub_path
-        elif target.startswith("/"):
-            # Absolute destination relative to archive root
-            dest_dir = PurePosixPath(target.lstrip("/"))
-            arc_rel = dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
-        elif target in ("..", "../"):
-            p_parent = (
-                ancestor.parent.parent
-                if ancestor.parent.parent != PurePosixPath(".")
-                else PurePosixPath()
-            )
-            arc_rel = p_parent / sub_path if p_parent != PurePosixPath() else sub_path
-        else:
-            # Relative destination: relative to subdirectory scope if scoped, else ancestor.parent
-            if scope != PurePosixPath():
-                dest_dir = scope / target
-            else:
-                p_parent_str = (
-                    ancestor.parent.as_posix() if ancestor.parent != PurePosixPath(".") else ""
-                )
-                comb = os.path.normpath(os.path.join(p_parent_str, target)).lstrip("./")
-                dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
-            arc_rel = dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
-    else:
-        if target in (".", "./"):
-            arc_rel = rel_path
-        elif target in ("?", "?/"):
-            if rel_path.parent == PurePosixPath("."):
-                arc_rel = rel_path
-            else:
-                p_parent = (
-                    rel_path.parent.parent
-                    if rel_path.parent.parent != PurePosixPath(".")
-                    else PurePosixPath()
-                )
-                arc_rel = (
-                    p_parent / rel_path.name
-                    if p_parent != PurePosixPath()
-                    else PurePosixPath(rel_path.name)
-                )
-        elif target.startswith("/"):
-            # Absolute destination relative to archive root
-            dest_dir = PurePosixPath(target.lstrip("/"))
-            arc_rel = (
-                dest_dir / rel_path.name
-                if dest_dir != PurePosixPath()
-                else PurePosixPath(rel_path.name)
-            )
-        elif target in ("..", "../"):
-            p_parent = (
-                rel_path.parent.parent
-                if rel_path.parent.parent != PurePosixPath(".")
-                else PurePosixPath()
-            )
-            arc_rel = (
-                p_parent / rel_path.name
-                if p_parent != PurePosixPath()
-                else PurePosixPath(rel_path.name)
-            )
-        else:
-            # Relative destination: relative to subdirectory scope if scoped, else rel_path.parent
-            if scope != PurePosixPath():
-                dest_dir = scope / target
-            else:
-                p_str = rel_path.parent.as_posix() if rel_path.parent != PurePosixPath(".") else ""
-                comb = os.path.normpath(os.path.join(p_str, target)).lstrip("./")
-                dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
-            arc_rel = (
-                dest_dir / rel_path.name
-                if dest_dir != PurePosixPath()
-                else PurePosixPath(rel_path.name)
-            )
+            return rel_path
 
-    return False, arc_rel, rescued_by
+        has_ancestor = shallowest_excluded_ancestor is not None
+        sub_path = (
+            rel_path.relative_to(shallowest_excluded_ancestor)
+            if shallowest_excluded_ancestor is not None
+            else PurePosixPath(rel_path.name)
+        )
+        anchor_parent = (
+            shallowest_excluded_ancestor.parent
+            if shallowest_excluded_ancestor is not None
+            else rel_path.parent
+        )
+
+        if target in ("?", "?/"):
+            if has_ancestor:
+                dest_dir = anchor_parent
+            else:
+                if rel_path.parent == PurePosixPath("."):
+                    return rel_path
+                dest_dir = anchor_parent.parent
+        elif target in ("..", "../"):
+            dest_dir = anchor_parent.parent
+        elif target.startswith("/"):
+            dest_dir = PurePosixPath(target.lstrip("/"))
+        elif scope != PurePosixPath():
+            dest_dir = scope / target
+        else:
+            base_str = anchor_parent.as_posix() if anchor_parent != PurePosixPath(".") else ""
+            comb = os.path.normpath(os.path.join(base_str, target)).lstrip("./")
+            dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
+
+        if dest_dir == PurePosixPath("."):
+            dest_dir = PurePosixPath()
+        return dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
+
+    def _scoped_target(
+        self, path: PurePosixPath, posix_str: str, scope: PurePosixPath
+    ) -> str | None:
+        if scope == PurePosixPath():
+            return posix_str
+        if not path.is_relative_to(scope) or path == scope:
+            return None
+        return path.relative_to(scope).as_posix()
+
+    def _redelete_matches_rescue(self, redelete_target: str, rescued_by: IgnoreRule | None) -> bool:
+        if not redelete_target or rescued_by is None:
+            return True
+        r_target = rescued_by.target
+        if redelete_target in (
+            r_target,
+            r_target.lstrip("/"),
+            r_target.rstrip("/"),
+            f"?/{r_target}",
+            r_target.removeprefix("?/"),
+        ):
+            return True
+        return redelete_target == "?" and r_target in ("?", "?/")
+
+
+def evaluate_path(
+    rel_path: PurePosixPath,
+    is_dir: bool,
+    rules: Sequence[IgnoreRule],
+) -> tuple[bool, PurePosixPath | None, IgnoreRule | None]:
+    """Evaluate path against rules, returning (is_excluded, arc_rel_path, matched_rule)."""
+    res = PathEvaluator(rules).evaluate(rel_path, is_dir=is_dir)
+    return res.is_excluded, res.arc_path, res.matched_rule

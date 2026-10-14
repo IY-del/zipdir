@@ -1,11 +1,12 @@
 """Data models and schemas for zipdir packaging and ignore rules."""
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RuleKind(Enum):
@@ -14,6 +15,15 @@ class RuleKind(Enum):
     EXCLUDE = 0
     RESCUE = 1
     REDELETE = 2
+
+
+@dataclass(frozen=True)
+class ParsedRule:
+    """Intermediary AST representation for an interpreted .zipignore rule."""
+
+    kind: RuleKind
+    target: str
+    pattern: str
 
 
 @dataclass(frozen=True)
@@ -31,12 +41,21 @@ class IgnoreRule:
 
 
 @dataclass(frozen=True)
-class ParsedRule:
-    """Intermediary AST representation for an interpreted .zipignore rule."""
+class EvaluationResult:
+    """Outcome of evaluating a path against a compiled rule set.
 
-    kind: RuleKind
-    target: str
-    pattern: str
+    Supports both named attribute access and 3-tuple unpacking:
+    `is_excluded, arc_path, matched_rule = evaluator.evaluate(path, is_dir)`
+    """
+
+    is_excluded: bool
+    arc_path: PurePosixPath | None
+    matched_rule: IgnoreRule | None
+
+    def __iter__(self) -> Iterator[bool | PurePosixPath | IgnoreRule | None]:
+        yield self.is_excluded
+        yield self.arc_path
+        yield self.matched_rule
 
 
 class ScopedRule(BaseModel):
@@ -59,11 +78,13 @@ class PresetModel(BaseModel):
 class PackagerConfig(BaseModel):
     """Configuration options for directory packaging."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     source: Path
     output: Path
     name: str
     preset_name: str
-    rules: list[str | ScopedRule] = Field(default_factory=list)
+    rules: list[str | ScopedRule | IgnoreRule] = Field(default_factory=list)
     compression: int = 6
     flat: bool = False
     dry_run: bool = False
