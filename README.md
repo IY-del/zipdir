@@ -58,9 +58,11 @@ alias zipd='zipdir'
   - 一方で、ビルドされた最終成果物（`out/report.pdf`）だけはアーカイブに含める必要がある。
 - **解決策**:
   - `clean` を継承した `report` プリセットを使用：
+
     ```sh
-    zipdir report --preset report
+    zipdir report -p report
     ```
+
   - `out/` をまるごと除外しつつ、`!out/*.pdf`（亡命ルート）の働きによって `report.pdf` のみが自動的にアーカイブ直下へリフトされて収録されます。中間ゴミのない綺麗な提出用 ZIP が 1 コマンドで完成します。
 
 ### ユースケース 2: ソースコードの提出・配布（クリーンアーカイブ）
@@ -69,9 +71,11 @@ alias zipd='zipdir'
   - プロジェクトを共同作業者や提出先に送る際、容量を食う `node_modules/` や Python の `.venv`、`__pycache__`、秘密情報を含む `.env`、OS 特有のメタデータ（`.DS_Store`、`Thumbs.db`）が混入するのを防ぎたい。
 - **解決策**:
   - デフォルトの `clean` プリセットをそのまま実行：
+
     ```sh
     zipdir my_project
     ```
+
   - VCS、エディタ設定、各種キャッシュ、環境変数ファイル、`.zipignore` 自身が自動的に一括除外され、安全かつ軽量な配布 ZIP が生成されます。
 
 ### ユースケース 3: サブプロジェクトごとの局所ルール管理（モノレポ構成）
@@ -91,10 +95,12 @@ alias zipd='zipdir'
   - ビルドによって深い階層（`build/release/bin/app` や `src/data/output.csv`）に出力されたファイルを、提出・配布用 ZIP 内では直感的な `dist/` やルート直下に綺麗に再配置してパッケージングしたい。
 - **解決策**:
   - リマップ記法を活用：
+
     ```text
     dist!build/release/bin/*
     /!src/data/output.csv
     ```
+
   - ファイルシステム上の元ディレクトリ構造を汚すことなく、ZIP 内部での配置先のみを柔軟に制御してアーカイブ化できます。
 
 ---
@@ -116,9 +122,10 @@ alias zipd='zipdir'
 1. **非貪欲枝刈り (Non-Greedy Pruning)**
    - ディレクトリ走査の前にツリー全体の局所 `.zipignore` を先行探索し、配下に有効な救出ルールがあるディレクトリは誤って除外枝刈り（Prune）されないように保護します。
 
-1. **使いやすい既定値とオプション**
-   - デフォルトの出力ファイル名は `<ディレクトリ名>.zip` です。
-   - `-t` / `--timestamp` フラグを指定することで、`<ディレクトリ名>_<YYYYMMDD_HHMMSS>.zip` の形式でタイムスタンプを付与できます。
+1. **3 系統の出力先解決とタイムスタンプ自動フォールバック**
+   - デフォルトの出力先はカレントディレクトリ（`./<ディレクトリ名>.zip`）です。ソース内部に出力される場合でも、出力 ZIP 自身は自動的にパッケージ対象から除外されます。
+   - `-o` オプションは先頭プレフィックスによって **絶対パス（`/`・`~/`）**、**カレント相対パス（`./`・`../`）**、**ソース親相対パス（`___` または値省略 `-o` / `-o ?`）** の 3 系統を直感的に切り替えられます。
+   - 出力ファイル名を `.zip` まで明示していない場合（未指定やディレクトリ指定時）、同名の `.zip` が既に存在すると自動的に `-t`（`<stem>_<YYYYMMDD_HHMMSS>.zip`）へフォールバックして完了します。
 
 ---
 
@@ -156,7 +163,7 @@ alias zipd='zipdir'
    - 階層が深いサブディレクトリのルールほど、より浅い親ディレクトリのルールを局所的に上書きします。
 
 1. **コマンドライン引数 (Tier 4: CLI Overrides)**
-   - `-x` / `--exclude`、`-r` / `--rule` など、CLI 実行時に渡された最優先オプション。
+   - `-r` / `--rule`（または `-x` / `--exclude`）など、CLI 実行時に渡された最優先オプション。
 
 ---
 
@@ -189,24 +196,27 @@ dist!build/*.tar.gz
 ### 基本的なコマンド
 
 ```sh
-# カレントディレクトリを ../<dir>.zip にアーカイブ
+# カレントディレクトリを ./<dir>.zip にアーカイブ（既存時は _<timestamp>.zip へ自動フォールバック）
 zipdir
 
-# タイムスタンプ付きのアーカイブ (../<dir>_<timestamp>.zip) を作成
-zipdir -t
+# ソースの親ディレクトリ (<source.parent>/<dir>.zip) に出力
+zipdir -o
 
-# 特定のディレクトリをパッケージ
-zipdir path/to/my_project
+# カレント相対パス (./___) で出力先を指定
+zipdir -o ./dist/
+zipdir -o ./custom.zip
 
-# 出力先パスを指定
+# ソースの親相対パス (___) で出力先を指定
+zipdir path/to/my_project -o sibling.zip
+
+# 絶対パスで出力先を指定
 zipdir path/to/my_project -o /tmp/custom.zip
-zipdir path/to/my_project /tmp/custom.zip
 
-# 既存ファイルを上書き
+# 既存ファイルを上書き (.zip 明示時や同名上書き時)
 zipdir -f
 
 # プリセットを指定
-zipdir --preset report
+zipdir -p report
 
 # プリセット一覧とルール内容を表示
 zipdir --list-presets
@@ -215,19 +225,17 @@ zipdir --list-presets
 zipdir --dry-run
 
 # 個別ルールの追加指定
-zipdir -x "*.bak" -r "!dist!*.csv"
+zipdir -r "*.bak" -r "!dist!*.csv"
 ```
 
 ### CLI オプション一覧
 
-- `-t, --timestamp`: 出力ファイル名にタイムスタンプ（`_YYYYMMDD_HHMMSS`）を付与（既定: `False`）
-- `--preset <name>`: 使用するプリセット名を指定（既定: `clean`）
+- `-o, --output [path]`: 出力先を指定（省略時: カレント `./`、値なしの `-o` または `-o ?`: ソースの親、`./___`: カレント相対、`___`: ソース親相対、`/___`・`~/___`: 絶対パス）
+- `-t, --timestamp`: 出力ファイル名にタイムスタンプ（`_YYYYMMDD_HHMMSS`）を付与（既定: `False`、未指定・ディレクトリ指定時の重複時は自動フォールバック）
+- `-p, --preset <name|path>`: 使用するプリセット名または `.zipignore` ファイルパスを指定（既定: `clean`）
 - `--list-presets`: 利用可能なプリセット一覧を表示して終了
-- `-x, --exclude <pattern>`: 追加の除外パターンを指定（複数指定可）
-- `-r, --rule <rule>`: 追加のルール（救出・リマップ等）を指定（複数指定可）
-- `-k, --keep <pattern>`: プリセットのルールから特定の完全一致パターンを削除（複数指定可）
+- `-r, --rule, -x, --exclude <rule>`: 追加のルール（除外・救出・再除外）を指定（複数指定可）
 - `--no-default-rules`: プリセットのルールを一切適用しない
-- `-o, --output <path>`: 出力ファイル名または出力先ディレクトリを指定
 - `--name <name>`: アーカイブのルートディレクトリ名および既定のプレフィックスを指定
 - `--flat`: ZIP 内部に最上位の親ディレクトリを含めず、直下に展開されるようにフラット化
 - `--compression <0..9>`: 圧縮レベルを指定（0: 無圧縮、1〜9: デフレート、既定: 6）
