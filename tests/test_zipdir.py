@@ -749,46 +749,175 @@ class TestScopedRules:
 
 
 # ==============================================================================
-# 7. Output Path Resolution Tests (Timestamp flag behavior)
+# 7. Output Path Resolution & Collision Fallback Tests
 # ==============================================================================
 class TestOutputPathResolution:
-    """Verifies resolve_output_path with timestamp flag defaulting to False."""
+    """Verifies OutputResolver 3-tier path prefix rules, bare -o, and timestamp collision fallback."""
 
-    def test_default_output_path_has_no_timestamp(self) -> None:
-        """When output_target is None and timestamp is False, output should be <name>.zip."""
-        source = Path("/tmp/my_project")
-        res = resolve_output_path(source, "my_project", None, timestamp=False)
-        assert res.name == "my_project.zip"
-        assert res.parent == Path("/tmp").resolve()
+    def test_default_output_path_is_current_directory(self, tmp_path: Path) -> None:
+        """When output_target is None and timestamp is False, output defaults to cwd/<name>.zip."""
+        source = tmp_path / "some" / "nested" / "my_project"
+        cwd = tmp_path / "work"
+        cwd.mkdir(parents=True)
+        res = resolve_output_path(source, "my_project", None, timestamp=False, cwd=cwd)
+        assert res == cwd.resolve() / "my_project.zip"
 
-    def test_output_path_with_timestamp(self) -> None:
-        """When timestamp is True, output should have _<YYYYMMDD_HHMMSS>.zip."""
+    def test_output_path_with_timestamp(self, tmp_path: Path) -> None:
+        """When timestamp is True, output should have _<YYYYMMDD_HHMMSS>.zip in cwd."""
         source = Path("/tmp/my_project")
-        res = resolve_output_path(source, "my_project", None, timestamp=True)
+        res = resolve_output_path(source, "my_project", None, timestamp=True, cwd=tmp_path)
+        assert res.parent == tmp_path.resolve()
         assert res.name.startswith("my_project_")
         assert res.name.endswith(".zip")
         assert len(res.name) > len("my_project_.zip")
 
-    def test_output_dir_without_timestamp(self, tmp_path: Path) -> None:
-        """When output is an existing directory and timestamp is False, output is inside that dir with <name>.zip."""
-        source = Path("/tmp/my_project")
-        res = resolve_output_path(source, "my_project", tmp_path, timestamp=False)
-        assert res == tmp_path / "my_project.zip"
+    def test_three_tier_prefix_resolution(self, tmp_path: Path) -> None:
+        """Verifies / (absolute), ./ (cwd-relative), and bare ___ / ? (source.parent-relative)."""
+        parent_dir = tmp_path / "parent"
+        source = parent_dir / "src_proj"
+        cwd = tmp_path / "current_work"
+        source.mkdir(parents=True)
+        cwd.mkdir(parents=True)
 
-    def test_output_dir_with_timestamp(self, tmp_path: Path) -> None:
-        """When output is an existing directory and timestamp is True, output is inside that dir with timestamp."""
-        source = Path("/tmp/my_project")
-        res = resolve_output_path(source, "my_project", tmp_path, timestamp=True)
-        assert res.parent == tmp_path
-        assert res.name.startswith("my_project_")
-        assert res.name.endswith(".zip")
+        # 1. Cwd-relative: ./___
+        res_cwd = resolve_output_path(source, "src_proj", "./local_out.zip", cwd=cwd)
+        assert res_cwd == cwd.resolve() / "local_out.zip"
 
-    def test_explicit_output_filename_ignores_timestamp(self) -> None:
-        """Explicit output file target preserves the provided filename regardless of timestamp flag."""
+        res_cwd_stem = resolve_output_path(source, "src_proj", "./local_stem", cwd=cwd)
+        assert res_cwd_stem == cwd.resolve() / "local_stem.zip"
+
+        # 2. Source-parent-relative: ___ (without ?), ?___, ?/___, and bare ?
+        res_parent_bare = resolve_output_path(source, "src_proj", "sibling.zip", cwd=cwd)
+        assert res_parent_bare == parent_dir.resolve() / "sibling.zip"
+
+        res_parent_q = resolve_output_path(source, "src_proj", "?/sibling2.zip", cwd=cwd)
+        assert res_parent_q == parent_dir.resolve() / "sibling2.zip"
+
+        res_parent_root = resolve_output_path(source, "src_proj", "?", cwd=cwd)
+        assert res_parent_root == parent_dir.resolve() / "src_proj.zip"
+
+        # 3. Absolute: /___
+        abs_target = tmp_path / "abs_out.zip"
+        res_abs = resolve_output_path(source, "src_proj", str(abs_target), cwd=cwd)
+        assert res_abs == abs_target.resolve()
+
+    def test_output_dir_without_and_with_timestamp(self, tmp_path: Path) -> None:
+        """When output is an existing directory, places <name>.zip or <name>_<ts>.zip inside it."""
         source = Path("/tmp/my_project")
-        explicit_target = Path("/tmp/custom_archive.zip")
+        res1 = resolve_output_path(source, "my_project", tmp_path, timestamp=False)
+        assert res1 == tmp_path.resolve() / "my_project.zip"
+
+        res2 = resolve_output_path(source, "my_project", tmp_path, timestamp=True)
+        assert res2.parent == tmp_path.resolve()
+        assert res2.name.startswith("my_project_")
+        assert res2.name.endswith(".zip")
+
+    def test_collision_fallback_to_timestamp_when_unspecified_or_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """When <stem>.zip already exists and .zip was not explicitly specified, falls back to -t."""
+        source = tmp_path / "my_project"
+        source.mkdir()
+        (source / "main.py").write_text("print(1)")
+
+        existing_zip = tmp_path / "my_project.zip"
+        existing_zip.write_text("old archive")
+
+        # 1. Default (unspecified) in cwd=tmp_path falls back to my_project_<ts>.zip
+        resolved = resolve_output_path(
+            source, "my_project", None, timestamp=False, force=False, cwd=tmp_path
+        )
+        assert resolved.parent == tmp_path.resolve()
+        assert resolved.name.startswith("my_project_")
+        assert resolved.name.endswith(".zip")
+        assert resolved != existing_zip.resolve()
+
+        # 2. Directory target (-o tmp_path) also falls back to my_project_<ts>.zip
+        resolved_dir = resolve_output_path(
+            source, "my_project", str(tmp_path), timestamp=False, force=False, cwd=tmp_path
+        )
+        assert resolved_dir.name.startswith("my_project_")
+        assert resolved_dir != existing_zip.resolve()
+
+        # 3. With force=True, does NOT fall back (overwrites my_project.zip)
+        resolved_force = resolve_output_path(
+            source, "my_project", None, timestamp=False, force=True, cwd=tmp_path
+        )
+        assert resolved_force == existing_zip.resolve()
+
+    def test_package_current_directory_excludes_self_and_collided_zip(self, tmp_path: Path) -> None:
+        """Packaging source when output is inside source succeeds and skips self archives."""
+        source = tmp_path / "proj"
+        source.mkdir()
+        (source / "app.py").write_text("code")
+
+        # First run: creates proj/proj.zip inside source itself
+        out1 = resolve_output_path(source, "proj", None, cwd=source)
+        assert out1 == source.resolve() / "proj.zip"
+        cfg1 = PackagerConfig(
+            source=source, output=out1, name="proj", preset_name="clean", flat=True
+        )
+        ZipPackager(cfg1).package()
+        assert out1.exists()
+        with zipfile.ZipFile(out1, "r") as zf:
+            assert set(zf.namelist()) == {"app.py"}
+
+        # Second run without -f: collides with proj/proj.zip, falls back to proj/proj_<ts>.zip,
+        # and does not include proj.zip inside the new archive!
+        out2 = resolve_output_path(source, "proj", None, cwd=source)
+        assert out2 != out1
+        assert out2.name.startswith("proj_")
+        cfg2 = PackagerConfig(
+            source=source, output=out2, name="proj", preset_name="clean", flat=True
+        )
+        ZipPackager(cfg2).package()
+        assert out2.exists()
+        with zipfile.ZipFile(out2, "r") as zf:
+            assert set(zf.namelist()) == {"app.py"}
+
+    def test_bare_o_cli_normalization(self, tmp_path: Path) -> None:
+        """Verifies that bare `-o` at end of args or before another flag normalizes to `?`."""
+        from typer.testing import CliRunner
+
+        from zipdir.cli import app
+        from zipdir.output import OutputResolver
+
+        resolver = OutputResolver()
+        assert resolver.normalize_cli_args(["-o"]) == ["-o", "?"]
+        assert resolver.normalize_cli_args(["report", "-o"]) == ["report", "-o", "?"]
+        assert resolver.normalize_cli_args(["-o", "-t"]) == ["-o", "?", "-t"]
+        assert resolver.normalize_cli_args(["-o", "./sub"]) == ["-o", "./sub"]
+
+        source = tmp_path / "sub_proj"
+        source.mkdir()
+        (source / "hello.txt").write_text("world")
+
+        runner = CliRunner()
+        result = runner.invoke(app, [str(source), "-o"])
+        assert result.exit_code == 0
+        expected_zip = tmp_path / "sub_proj.zip"
+        assert expected_zip.exists()
+
+    def test_explicit_output_filename_ignores_timestamp_and_does_not_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """Explicit .zip output file target preserves filename and raises FileExistsError on collision."""
+        source = tmp_path / "my_project"
+        source.mkdir()
+        (source / "file.txt").write_text("hello")
+        explicit_target = tmp_path / "custom_archive.zip"
+        explicit_target.write_text("existing")
         expected = explicit_target.parent.resolve() / explicit_target.name
         res1 = resolve_output_path(source, "my_project", explicit_target, timestamp=False)
         assert res1 == expected
         res2 = resolve_output_path(source, "my_project", explicit_target, timestamp=True)
+        config = PackagerConfig(
+            source=source,
+            output=res1,
+            name="my_project",
+            preset_name="clean",
+            force=False,
+        )
+        with pytest.raises(FileExistsError):
+            ZipPackager(config).package()
         assert res2 == expected
