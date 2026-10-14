@@ -82,24 +82,10 @@ class OutputResolver:
         """Resolve destination archive path and return ResolvedOutput metadata."""
         if output_target is None:
             base_dir = self.cwd.resolve()
-            stem = name
-            return self._build_Dynamic_output(base_dir, stem, timestamp=timestamp, force=force)
+            return self._build_dynamic_output(base_dir, name, timestamp=timestamp, force=force)
 
         raw = output_target.strip() if isinstance(output_target, str) else str(output_target)
-
-        if raw in ("", "?", "?/"):
-            target_path = source.parent
-            is_forced_dir = True
-        elif raw.startswith("/") or raw == "~" or raw.startswith("~/"):
-            target_path = Path(raw).expanduser()
-            is_forced_dir = raw.endswith("/")
-        elif raw in (".", "..") or raw.startswith("./") or raw.startswith("../"):
-            target_path = self.cwd / raw
-            is_forced_dir = raw in (".", "..") or raw.endswith("/")
-        else:
-            rel = raw.removeprefix("?/").removeprefix("?")
-            target_path = source.parent / rel if rel else source.parent
-            is_forced_dir = not rel or raw.endswith("/")
+        target_path, is_forced_dir = self._classify_target(source, raw)
 
         if raw.endswith(".zip") and not is_forced_dir:
             final_path = target_path.parent.resolve() / target_path.name
@@ -117,7 +103,7 @@ class OutputResolver:
             base_dir = target_path.parent.resolve()
             stem = target_path.name
 
-        return self._build_Dynamic_output(base_dir, stem, timestamp=timestamp, force=force)
+        return self._build_dynamic_output(base_dir, stem, timestamp=timestamp, force=force)
 
     def resolve(
         self,
@@ -137,7 +123,20 @@ class OutputResolver:
             force=force,
         ).path
 
-    def _build_Dynamic_output(
+    def _classify_target(self, source: Path, raw: str) -> tuple[Path, bool]:
+        """Classify raw output string into (target_path, is_forced_dir) across 3 prefix tiers."""
+        if raw in ("", "?", "?/"):
+            return source.parent, True
+        if raw.startswith("/") or raw == "~" or raw.startswith("~/"):
+            return Path(raw).expanduser(), raw.endswith("/")
+        if raw in (".", "..") or raw.startswith("./") or raw.startswith("../"):
+            return self.cwd / raw, raw in (".", "..") or raw.endswith("/")
+
+        rel = raw.removeprefix("?/").removeprefix("?")
+        target_path = source.parent / rel if rel else source.parent
+        return target_path, not rel or raw.endswith("/")
+
+    def _build_dynamic_output(
         self,
         base_dir: Path,
         stem: str,

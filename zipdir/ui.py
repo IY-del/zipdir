@@ -10,8 +10,8 @@ from zipdir.models import PackagerConfig, PresetModel
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
-def _c(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m" if USE_COLOR else text
+def _c(text: str, code: str, *, enabled: bool = USE_COLOR) -> str:
+    return f"\033[{code}m{text}\033[0m" if enabled else text
 
 
 def color_success(text: str) -> str:
@@ -47,18 +47,23 @@ def format_size(num_bytes: int | float) -> str:
 class ConsoleReporter:
     """Renders packaging summaries, dry-run previews, and preset listings to the terminal."""
 
+    use_color: bool
+
+    def __init__(self, use_color: bool | None = None) -> None:
+        self.use_color = USE_COLOR if use_color is None else use_color
+
     def print_presets(self, presets: Mapping[str, PresetModel]) -> None:
         """Display available presets and their configurations."""
-        print(color_bold("\nAvailable zipdir presets:\n"))
+        print(self._bold("\nAvailable zipdir presets:\n"))
         for name, p in presets.items():
             src_info = f"({p.source_path})" if p.source_path else "(built-in)"
             extends_info = f" [extends {', '.join(p.extends)}]" if p.extends else ""
             print(
-                f"  {color_cyan(name):<12} {color_bold(p.description)}{color_dim(extends_info)} {color_dim(src_info)}"
+                f"  {self._cyan(name):<12} {self._bold(p.description)}{self._dim(extends_info)} {self._dim(src_info)}"
             )
             if p.rules:
                 rules_str = ", ".join(p.rules)
-                print(f"    {color_dim('• Rules:')} {rules_str}")
+                print(f"    {self._dim('• Rules:')} {rules_str}")
             print()
 
     def print_dry_run(
@@ -70,20 +75,20 @@ class ConsoleReporter:
     ) -> None:
         """Render dry-run preview of archive structure."""
         print(
-            f"\n{color_yellow('[DRY RUN]')} Resulting archive structure for {color_bold(config.output.name)}:"
+            f"\n{self._yellow('[DRY RUN]')} Resulting archive structure for {self._bold(config.output.name)}:"
         )
         print(f"  • Source:   {config.source}")
         print(f"  • Preset:   {config.preset_name}")
         print(f"  • Rules:    {len(config.rules)} rules\n")
         if rescued_files:
-            print(color_cyan("Rescued / Remapped files (!):"))
+            print(self._cyan("Rescued / Remapped files (!):"))
             for src, dst in rescued_files:
                 print(f"  ↑ {src} -> {dst}")
         if excluded_files:
-            print(color_yellow("Excluded paths:"))
+            print(self._yellow("Excluded paths:"))
             for ex in excluded_files:
                 print(f"  ✕ {ex}")
-        print(color_bold("Archive members:"))
+        print(self._bold("Archive members:"))
         for _, arcname in entries:
             print(f"  + {arcname}")
 
@@ -101,18 +106,33 @@ class ConsoleReporter:
         size_str = format_size(output.stat().st_size)
 
         print(
-            f"{color_success('✔')} Created archive: {color_bold(output.name)} {color_dim(f'({size_str})')}"
+            f"{self._success('✔')} Created archive: {self._bold(output.name)} {self._dim(f'({size_str})')}"
         )
-        print(f"  {color_dim('Path:')}     {color_cyan(str(output))}")
-        print(f"  {color_dim('Preset:')}   {config.preset_name} ({len(config.rules)} rules)")
-        print(f"  {color_dim('Members:')}  {file_count} files, {dir_count} directories")
+        print(f"  {self._dim('Path:')}     {self._cyan(str(output))}")
+        print(f"  {self._dim('Preset:')}   {config.preset_name} ({len(config.rules)} rules)")
+        print(f"  {self._dim('Members:')}  {file_count} files, {dir_count} directories")
 
         if config.verbose:
             if rescued_files:
-                print(f"\n{color_cyan('Rescued / Remapped files (!):')}")
+                print(f"\n{self._cyan('Rescued / Remapped files (!):')}")
                 for src, dst in rescued_files:
                     print(f"  ↑ {src} -> {dst}")
             if excluded_files:
-                print(f"{color_yellow('Excluded paths:')}")
+                print(f"{self._yellow('Excluded paths:')}")
                 for ex in excluded_files:
                     print(f"  ✕ {ex}")
+
+    def _success(self, text: str) -> str:
+        return _c(text, "1;32", enabled=self.use_color)
+
+    def _dim(self, text: str) -> str:
+        return _c(text, "2", enabled=self.use_color)
+
+    def _bold(self, text: str) -> str:
+        return _c(text, "1", enabled=self.use_color)
+
+    def _cyan(self, text: str) -> str:
+        return _c(text, "36", enabled=self.use_color)
+
+    def _yellow(self, text: str) -> str:
+        return _c(text, "33", enabled=self.use_color)

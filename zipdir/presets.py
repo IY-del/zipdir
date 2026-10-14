@@ -2,7 +2,7 @@
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from zipdir.models import PresetModel, ScopedRule
@@ -57,12 +57,7 @@ class PresetCatalog:
                 continue
             rules.append(stripped)
 
-        stem = file.name
-        if stem.endswith(".zipignore"):
-            stem = stem.removesuffix(".zipignore")
-        elif stem.endswith((".yaml", ".yml")):
-            stem = file.stem
-
+        stem = self._extract_preset_stem(file)
         return PresetModel(
             name=stem,
             description=description,
@@ -73,63 +68,17 @@ class PresetCatalog:
 
     def load_all(self) -> dict[str, PresetModel]:
         """Discover and load presets from configuration directories, resolving inheritance."""
-        raw_presets: dict[str, PresetModel] = {}
-
-        for directory in self.preset_dirs:
-            if not directory.is_dir():
-                continue
-            found_files = (
-                sorted(directory.glob("*.zipignore"))
-                + sorted(directory.glob("*.yaml"))
-                + sorted(directory.glob("*.yml"))
-            )
-            for file in found_files:
-                stem = file.name.removesuffix(".zipignore")
-                if stem.endswith((".yaml", ".yml")):
-                    stem = file.stem
-                if stem not in raw_presets:
-                    try:
-                        raw_presets[stem] = self.parse_file(file)
-                    except Exception as e:
-                        print(
-                            f"zipdir: warning: failed to parse preset '{file}': {e}",
-                            file=sys.stderr,
-                        )
-
+        raw_presets = self._discover_raw_presets()
         presets: dict[str, PresetModel] = {}
 
-        def resolve(name: str, visited: list[str]) -> tuple[str, list[str], Path | None]:
-            if name in visited:
-                raise ValueError(
-                    f"Circular dependency in preset inheritance: {' -> '.join(visited)} -> {name}"
-                )
-            visited.append(name)
-
-            if name not in raw_presets:
-                raise ValueError(f"Preset '{name}' not found in configuration directories")
-
-            model = raw_presets[name]
-            merged_rules: list[str] = []
-            inherited_desc = model.description
-            for parent in model.extends:
-                p_desc, p_rules, _ = resolve(parent, visited.copy())
-                merged_rules.extend(p_rules)
-                if not inherited_desc:
-                    inherited_desc = p_desc
-
-            merged_rules.extend(model.rules)
-            squeezed = self.interpreter.squeeze(merged_rules)
-            final_rules = [r if isinstance(r, str) else r.rule for r in squeezed]
-            return inherited_desc, final_rules, model.source_path
-
-        for name in raw_presets:
+        for name, raw_model in raw_presets.items():
             try:
-                desc, rules, src = resolve(name, [])
+                desc, rules, src = self._resolve_preset_chain(name, raw_presets, [])
                 presets[name] = PresetModel(
                     name=name,
                     description=desc,
                     rules=rules,
-                    extends=raw_presets[name].extends,
+                    extends=raw_model.extends,
                     source_path=src,
                 )
             except Exception as e:
@@ -139,6 +88,65 @@ class PresetCatalog:
                 )
 
         return presets
+
+    def _extract_preset_stem(self, file: Path) -> str:
+        stem = file.name
+        if stem.endswith(".zipignore"):
+            return stem.removesuffix(".zipignore")
+        if stem.endswith((".yaml", ".yml")):
+            return file.stem
+        return stem
+
+    def _discover_raw_presets(self) -> dict[str, PresetModel]:
+        raw_presets: dict[str, PresetModel] = {}
+        for directory in self.preset_dirs:
+            if not directory.is_dir():
+                continue
+            found_files = (
+                sorted(directory.glob("*.zipignore"))
+                + sorted(directory.glob("*.yaml"))
+                + sorted(directory.glob("*.yml"))
+            )
+            for file in found_files:
+                stem = self._extract_preset_stem(file)
+                if stem not in raw_presets:
+                    try:
+                        raw_presets[stem] = self.parse_file(file)
+                    except Exception as e:
+                        print(
+                            f"zipdir: warning: failed to parse preset '{file}': {e}",
+                            file=sys.stderr,
+                        )
+        return raw_presets
+
+    def _resolve_preset_chain(
+        self,
+        name: str,
+        raw_presets: Mapping[str, PresetModel],
+        visited: list[str],
+    ) -> tuple[str, list[str], Path | None]:
+        if name in visited:
+            raise ValueError(
+                f"Circular dependency in preset inheritance: {' -> '.join(visited)} -> {name}"
+            )
+        visited.append(name)
+
+        if name not in raw_presets:
+            raise ValueError(f"Preset '{name}' not found in configuration directories")
+
+        model = raw_presets[name]
+        merged_rules: list[str] = []
+        inherited_desc = model.description
+        for parent in model.extends:
+            p_desc, p_rules, _ = self._resolve_preset_chain(parent, raw_presets, visited.copy())
+            merged_rules.extend(p_rules)
+            if not inherited_desc:
+                inherited_desc = p_desc
+
+        merged_rules.extend(model.rules)
+        squeezed = self.interpreter.squeeze(merged_rules)
+        final_rules = [r if isinstance(r, str) else r.rule for r in squeezed]
+        return inherited_desc, final_rules, model.source_path
 
     def discover_sub_zipignores(self, source: Path) -> list[tuple[PurePosixPath, Path]]:
         """Discover all .zipignore files in subdirectories under source, sorted by depth."""

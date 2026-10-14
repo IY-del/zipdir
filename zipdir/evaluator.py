@@ -1,6 +1,5 @@
 """Runtime path evaluation, smart remapping, and non-greedy directory pruning."""
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -11,9 +10,25 @@ from zipdir.squeezer import RuleInterpreter
 
 @dataclass
 class _AncestorStatus:
+    """Tracks exclusion and rescue state accumulated across ancestor directories."""
+
     is_excluded: bool = False
     shallowest_excluded_ancestor: PurePosixPath | None = None
     matched_rule: IgnoreRule | None = None
+
+    def apply(self, ancestor: PurePosixPath, rule: IgnoreRule) -> None:
+        """Apply a matching ancestor rule using hierarchical phagocytosis transitions."""
+        if rule.kind == RuleKind.EXCLUDE:
+            self.is_excluded = True
+            if self.shallowest_excluded_ancestor is None:
+                self.shallowest_excluded_ancestor = ancestor
+            self.matched_rule = rule
+        elif rule.kind == RuleKind.RESCUE:
+            self.is_excluded = False
+            self.matched_rule = rule
+        elif rule.kind == RuleKind.REDELETE:
+            self.is_excluded = True
+            self.matched_rule = rule
 
 
 class PathEvaluator:
@@ -73,19 +88,8 @@ class PathEvaluator:
             anc_str = anc.as_posix()
             for r in self.rules:
                 match_str = self._scoped_target(anc, anc_str, r.scope)
-                if match_str is None or not r.regex.search(match_str):
-                    continue
-                if r.kind == RuleKind.EXCLUDE:
-                    status.is_excluded = True
-                    if status.shallowest_excluded_ancestor is None:
-                        status.shallowest_excluded_ancestor = anc
-                    status.matched_rule = r
-                elif r.kind == RuleKind.RESCUE:
-                    status.is_excluded = False
-                    status.matched_rule = r
-                elif r.kind == RuleKind.REDELETE:
-                    status.is_excluded = True
-                    status.matched_rule = r
+                if match_str is not None and r.regex.search(match_str):
+                    status.apply(anc, r)
         return status
 
     def _evaluate_target(
@@ -155,15 +159,26 @@ class PathEvaluator:
         elif target.startswith("/"):
             dest_dir = PurePosixPath(target.lstrip("/"))
         elif scope != PurePosixPath():
-            dest_dir = scope / target
+            dest_dir = self._normalize_posix(scope / target)
         else:
-            base_str = anchor_parent.as_posix() if anchor_parent != PurePosixPath(".") else ""
-            comb = os.path.normpath(os.path.join(base_str, target)).lstrip("./")
-            dest_dir = PurePosixPath(comb) if comb and comb != "." else PurePosixPath()
+            dest_dir = self._normalize_posix(anchor_parent / target)
 
         if dest_dir == PurePosixPath("."):
             dest_dir = PurePosixPath()
         return dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
+
+    def _normalize_posix(self, path: PurePosixPath) -> PurePosixPath:
+        """Resolve '.' and '..' segments within a relative PurePosixPath."""
+        stack: list[str] = []
+        for part in path.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if stack:
+                    stack.pop()
+            else:
+                stack.append(part)
+        return PurePosixPath(*stack) if stack else PurePosixPath()
 
     def _scoped_target(
         self, path: PurePosixPath, posix_str: str, scope: PurePosixPath
