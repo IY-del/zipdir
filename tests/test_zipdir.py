@@ -1068,3 +1068,58 @@ class TestAnalogicalCoordinateAndCascade:
             names = zf.namelist()
             assert names.count("report.pdf") == 1
             assert zf.read("report.pdf").decode("utf-8") == "new built version"
+
+    def test_c3_linearization_diamond_inheritance(self, tmp_path: Path) -> None:
+        """Verifies C3 superclass linearization on diamond preset inheritance (A -> {B, C} -> D).
+
+        In a diamond hierarchy where A excludes '*.log', B rescues '!*.log', and C (also extending A)
+        excludes '*.tmp', naive depth-first resolution of '# inherit: B, C' would re-apply A's '*.log'
+        after B and clobber '!*.log'. C3 linearization resolves the order as [A, B, C, D], preserving B's rescue.
+        """
+        from zipdir.presets import PresetCatalog
+
+        preset_dir = tmp_path / "presets"
+        preset_dir.mkdir()
+        (preset_dir / "base_a.zipignore").write_text(
+            "# description: Base A\n*.log\n",
+            encoding="utf-8",
+        )
+        (preset_dir / "left_b.zipignore").write_text(
+            "# inherit: base_a\n!*.log\n",
+            encoding="utf-8",
+        )
+        (preset_dir / "right_c.zipignore").write_text(
+            "# inherit: base_a\n*.tmp\n",
+            encoding="utf-8",
+        )
+        (preset_dir / "diamond_d.zipignore").write_text(
+            "# inherit: left_b, right_c\n*.bak\n",
+            encoding="utf-8",
+        )
+
+        catalog = PresetCatalog(preset_dirs=[preset_dir])
+        raw = catalog._discover_raw_presets()
+        assert catalog.linearize_presets("diamond_d", raw) == [
+            "base_a",
+            "left_b",
+            "right_c",
+            "diamond_d",
+        ]
+
+        loaded = catalog.load_all()
+        assert loaded["diamond_d"].rules == ["!*.log", "*.tmp", "*.bak"]
+
+    def test_c3_linearization_inconsistent_hierarchy_raises(self) -> None:
+        """Verifies that C3 linearization raises ValueError when parent order is contradictory."""
+        from zipdir.presets import PresetCatalog
+
+        catalog = PresetCatalog(preset_dirs=[])
+        raw = {
+            "a": PresetModel(name="a", rules=["*.a"]),
+            "b": PresetModel(name="b", rules=["*.b"]),
+            "x": PresetModel(name="x", extends=["a", "b"], rules=[]),
+            "y": PresetModel(name="y", extends=["b", "a"], rules=[]),
+            "z": PresetModel(name="z", extends=["x", "y"], rules=[]),
+        }
+        with pytest.raises(ValueError, match="C3 linearization failed"):
+            catalog.linearize_presets("z", raw)
