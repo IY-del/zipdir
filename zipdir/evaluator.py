@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from zipdir.interpreter import redelete_matches_rescue
 from zipdir.models import EvaluationResult, IgnoreRule, RuleKind, ScopedRule
 from zipdir.squeezer import RuleInterpreter
 
@@ -130,6 +131,12 @@ class PathEvaluator:
         rescued_by: IgnoreRule,
         shallowest_excluded_ancestor: PurePosixPath | None,
     ) -> PurePosixPath:
+        """Resolve destination archive path using 3-tier coordinate prefixes:
+        - `/___`: Archive-root absolute coordinate
+        - `.` / `./___` / `..` / `../___`: Hierarchy-preserving or parent-climbing coordinate
+        - `?` / `?/___`: Exile-anchor (`anchor_parent`) relative coordinate
+        - `___`: Scope-relative (or `anchor_parent`-relative at root) coordinate
+        """
         target = rescued_by.target
         scope = rescued_by.scope
         if target in (".", "./"):
@@ -147,17 +154,38 @@ class PathEvaluator:
             else rel_path.parent
         )
 
-        if target in ("?", "?/"):
-            if has_ancestor:
-                dest_dir = anchor_parent
-            else:
-                if rel_path.parent == PurePosixPath("."):
-                    return rel_path
-                dest_dir = anchor_parent.parent
-        elif target in ("..", "../"):
-            dest_dir = anchor_parent.parent
+        if target.startswith("./"):
+            rel_sub = target.removeprefix("./").strip("/")
+            preserved_base = (
+                shallowest_excluded_ancestor
+                if shallowest_excluded_ancestor is not None
+                else rel_path.parent
+            )
+            dest_dir = (
+                self._normalize_posix(preserved_base / rel_sub)
+                if rel_sub
+                else self._normalize_posix(preserved_base)
+            )
+        elif target == "?" or target.startswith("?"):
+            exile_base = (
+                anchor_parent
+                if has_ancestor
+                else (
+                    PurePosixPath()
+                    if rel_path.parent == PurePosixPath(".")
+                    else anchor_parent.parent
+                )
+            )
+            rel_sub = target.removeprefix("?/").removeprefix("?").strip("/")
+            dest_dir = (
+                self._normalize_posix(exile_base / rel_sub)
+                if rel_sub
+                else self._normalize_posix(exile_base)
+            )
+        elif target in ("..", "../") or target.startswith("../"):
+            dest_dir = self._climb_from_anchor(anchor_parent, target)
         elif target.startswith("/"):
-            dest_dir = PurePosixPath(target.lstrip("/"))
+            dest_dir = self._normalize_posix(PurePosixPath(target.lstrip("/")))
         elif scope != PurePosixPath():
             dest_dir = self._normalize_posix(scope / target)
         else:
@@ -166,6 +194,22 @@ class PathEvaluator:
         if dest_dir == PurePosixPath("."):
             dest_dir = PurePosixPath()
         return dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
+
+    def _climb_from_anchor(self, anchor_parent: PurePosixPath, target: str) -> PurePosixPath:
+        """Climb N parent levels for each leading '..' segment and append any trailing subpath."""
+        current = PurePosixPath() if anchor_parent == PurePosixPath(".") else anchor_parent
+        parts = [p for p in target.split("/") if p and p != "."]
+        idx = 0
+        while idx < len(parts) and parts[idx] == "..":
+            current = (
+                PurePosixPath()
+                if current in (PurePosixPath(), PurePosixPath("."))
+                else current.parent
+            )
+            idx += 1
+        remainder = PurePosixPath(*parts[idx:]) if idx < len(parts) else PurePosixPath()
+        combined = current / remainder if remainder != PurePosixPath() else current
+        return self._normalize_posix(combined)
 
     def _normalize_posix(self, path: PurePosixPath) -> PurePosixPath:
         """Resolve '.' and '..' segments within a relative PurePosixPath."""
@@ -190,18 +234,9 @@ class PathEvaluator:
         return path.relative_to(scope).as_posix()
 
     def _redelete_matches_rescue(self, redelete_target: str, rescued_by: IgnoreRule | None) -> bool:
-        if not redelete_target or rescued_by is None:
-            return True
-        r_target = rescued_by.target
-        if redelete_target in (
-            r_target,
-            r_target.lstrip("/"),
-            r_target.rstrip("/"),
-            f"?/{r_target}",
-            r_target.removeprefix("?/"),
-        ):
-            return True
-        return redelete_target == "?" and r_target in ("?", "?/")
+        return redelete_matches_rescue(
+            redelete_target, rescued_by.target if rescued_by is not None else None
+        )
 
 
 def evaluate_path(

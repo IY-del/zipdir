@@ -15,6 +15,21 @@ from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
 RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$")
 
 
+def redelete_matches_rescue(redelete_target: str, rescued_target: str | None) -> bool:
+    """Check whether a REDELETE target cancels a given RESCUE target."""
+    if not redelete_target or rescued_target is None:
+        return True
+    if redelete_target in (
+        rescued_target,
+        rescued_target.lstrip("/"),
+        rescued_target.rstrip("/"),
+        f"?/{rescued_target}",
+        rescued_target.removeprefix("?/"),
+    ):
+        return True
+    return redelete_target == "?" and rescued_target in ("?", "?/")
+
+
 class RuleInterpreter:
     """Base interpreter that parses 4-component syntax and compiles .zipignore rules."""
 
