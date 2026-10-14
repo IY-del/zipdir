@@ -1109,8 +1109,10 @@ class TestAnalogicalCoordinateAndCascade:
         loaded = catalog.load_all()
         assert loaded["diamond_d"].rules == ["!*.log", "*.tmp", "*.bak"]
 
-    def test_c3_linearization_inconsistent_hierarchy_raises(self) -> None:
-        """Verifies that C3 linearization raises ValueError when parent order is contradictory."""
+    def test_c3_linearization_inconsistent_hierarchy_warns_and_falls_back(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verifies that C3 linearization emits a warning and provisionally resolves contradictory parent orders."""
         from zipdir.presets import PresetCatalog
 
         catalog = PresetCatalog(preset_dirs=[])
@@ -1121,5 +1123,8 @@ class TestAnalogicalCoordinateAndCascade:
             "y": PresetModel(name="y", extends=["b", "a"], rules=[]),
             "z": PresetModel(name="z", extends=["x", "y"], rules=[]),
         }
-        with pytest.raises(ValueError, match="C3 linearization failed"):
-            catalog.linearize_presets("z", raw)
+        order = catalog.linearize_presets("z", raw)
+        captured = capsys.readouterr()
+        assert "warning: C3 linearization conflict" in captured.err
+        assert order[-1] == "z"
+        assert set(order) == {"a", "b", "x", "y", "z"}

@@ -130,7 +130,7 @@ class PresetCatalog:
         return [node, *merged]
 
     def _c3_merge(self, sequences: list[list[str]]) -> list[str]:
-        """Standard C3 merge algorithm over non-empty MRO sequences."""
+        """Standard C3 merge algorithm with warning and provisional fallback on order conflicts."""
         result: list[str] = []
         active = [list(seq) for seq in sequences if seq]
 
@@ -143,19 +143,19 @@ class PresetCatalog:
                     break
 
             if candidate is None:
-                raise ValueError(
-                    f"Inconsistent preset inheritance order (C3 linearization failed): {active}"
+                candidate = active[0][0]
+                print(
+                    f"zipdir: warning: C3 linearization conflict in preset inheritance {active}; "
+                    f"provisionally selecting '{candidate}'",
+                    file=sys.stderr,
                 )
 
             result.append(candidate)
             next_active: list[list[str]] = []
             for seq in active:
-                if seq[0] == candidate:
-                    rem = seq[1:]
-                    if rem:
-                        next_active.append(rem)
-                else:
-                    next_active.append(seq)
+                rem = [item for item in seq if item != candidate]
+                if rem:
+                    next_active.append(rem)
             active = next_active
 
         return result
