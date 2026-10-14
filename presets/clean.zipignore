@@ -11,6 +11,8 @@ Desktop.ini
 
 # Version Control
 .git
+.gitignore
+.gitattributes
 .svn
 .hg
 
