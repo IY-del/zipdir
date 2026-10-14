@@ -921,3 +921,141 @@ class TestOutputPathResolution:
         with pytest.raises(FileExistsError):
             ZipPackager(config).package()
         assert res2 == expected
+
+
+# ==============================================================================
+# 8. Analogical Coordinate Algebra, Scoped Inheritance & Phagocytosis Tests
+# ==============================================================================
+class TestAnalogicalCoordinateAndCascade:
+    """Verifies 3-tier remap coordinates (?/{to}, ./{to}, ../../{to}), target-aware squeezing,
+    recursive LEGB scoped inheritance (# inherit: / # include:), and archive member phagocytosis.
+    """
+
+    def test_three_tier_remap_coordinates(self) -> None:
+        """Verifies ?/{to}!, ./{to}!, and multi-level ../../{to}! coordinate remapping."""
+        # 1. Exile-anchor relative coordinate: ?/dist!a/b/out/*.pdf -> a/b/dist/report.pdf
+        rules_exile = [
+            compile_rule("a/b/out/") or pytest.fail("rule failed"),
+            compile_rule("?/dist!a/b/out/*.pdf") or pytest.fail("rule failed"),
+        ]
+        exc1, arc1, _ = evaluate_path(PurePosixPath("a/b/out/report.pdf"), False, rules_exile)
+        assert not exc1
+        assert arc1 == PurePosixPath("a/b/dist/report.pdf")
+
+        # 2. Hierarchy-preserving coordinate with subpath: ./published!a/b/out/*.pdf -> a/b/out/published/report.pdf
+        rules_preserve = [
+            compile_rule("a/b/out/") or pytest.fail("rule failed"),
+            compile_rule("./published!a/b/out/*.pdf") or pytest.fail("rule failed"),
+        ]
+        exc2, arc2, _ = evaluate_path(PurePosixPath("a/b/out/report.pdf"), False, rules_preserve)
+        assert not exc2
+        assert arc2 == PurePosixPath("a/b/out/published/report.pdf")
+
+        # 3. Multi-level parent climbing coordinate: ../../bundle!a/b/c/out/*.pdf -> a/bundle/report.pdf
+        rules_climb = [
+            compile_rule("a/b/c/out/") or pytest.fail("rule failed"),
+            compile_rule("../../bundle!a/b/c/out/*.pdf") or pytest.fail("rule failed"),
+        ]
+        exc3, arc3, _ = evaluate_path(PurePosixPath("a/b/c/out/report.pdf"), False, rules_climb)
+        assert not exc3
+        assert arc3 == PurePosixPath("a/bundle/report.pdf")
+
+    def test_target_aware_compile_time_squeezer_isomorphism(self) -> None:
+        """Targeted REDELETE (!?/build!out/*.pdf) does not eat mismatched RESCUE (dist!out/*.pdf) during squeeze."""
+        raw_non_matching = [
+            "out/",
+            "dist!out/*.pdf",
+            "!?/build!out/*.pdf",
+        ]
+        squeezed_non_matching = squeeze_rules(raw_non_matching)
+        assert "dist!out/*.pdf" in squeezed_non_matching
+        compiled = RuleInterpreter().compile_all(raw_non_matching, squeeze=True)
+        exc1, arc1, _ = evaluate_path(PurePosixPath("out/report.pdf"), False, compiled)
+        assert not exc1
+        assert arc1 == PurePosixPath("dist/report.pdf")
+
+        # Matching targeted REDELETE (!?/dist!out/*.pdf) eats dist!out/*.pdf
+        raw_matching = [
+            "out/",
+            "dist!out/*.pdf",
+            "!?/dist!out/*.pdf",
+        ]
+        squeezed_matching = squeeze_rules(raw_matching)
+        assert squeezed_matching == ["out/", "!?/dist!out/*.pdf"]
+        compiled_match = RuleInterpreter().compile_all(raw_matching, squeeze=True)
+        exc2, arc2, _ = evaluate_path(PurePosixPath("out/report.pdf"), False, compiled_match)
+        assert exc2
+        assert arc2 is None
+
+    def test_scoped_subdir_inheritance_and_relative_ignore_include(self, tmp_path: Path) -> None:
+        """Subdirectory .zipignore supports # inherit: <preset> and # include: <relative_file> within its scope."""
+        from zipdir.presets import PresetCatalog
+
+        source = tmp_path / "workspace"
+        source.mkdir()
+        (source / ".gitignore").write_text("*.secret\n", encoding="utf-8")
+        (source / ".zipignore").write_text("# include: .gitignore\n", encoding="utf-8")
+        (source / "root.secret").write_text("hidden")
+        (source / "readme.md").write_text("visible")
+
+        # Subdirectory module inheriting 'report' preset and a local .gitignore
+        mod = source / "module_a"
+        mod.mkdir()
+        (mod / ".gitignore").write_text("*.local_tmp\n", encoding="utf-8")
+        (mod / ".zipignore").write_text(
+            "# inherit: report, .gitignore\n",
+            encoding="utf-8",
+        )
+        (mod / "out").mkdir()
+        (mod / "out" / "paper.pdf").write_text("pdf content")
+        (mod / "out" / "paper.aux").write_text("aux content")
+        (mod / "scratch.local_tmp").write_text("temp")
+        (mod / "code.py").write_text("print(1)")
+
+        catalog = PresetCatalog()
+        preset_name, cascade_rules = catalog.resolve_cascade(source)
+        output_zip = tmp_path / "workspace.zip"
+        config = PackagerConfig(
+            source=source,
+            output=output_zip,
+            name="workspace",
+            preset_name=preset_name,
+            rules=cascade_rules,
+            flat=True,
+            force=True,
+        )
+        ZipPackager(config).package()
+
+        with zipfile.ZipFile(output_zip, "r") as zf:
+            members = set(zf.namelist())
+            assert "readme.md" in members
+            assert "root.secret" not in members
+            assert "module_a/code.py" in members
+            assert "module_a/paper.pdf" in members
+            assert "module_a/out/paper.aux" not in members
+            assert "module_a/scratch.local_tmp" not in members
+
+    def test_archive_member_phagocytosis_on_arcname_collision(self, tmp_path: Path) -> None:
+        """When multiple files map to the same archive path, later/rescued member replaces earlier one without duplicate ZIP entries."""
+        source = tmp_path / "proj"
+        source.mkdir()
+        (source / "report.pdf").write_text("old root version")
+        (source / "out").mkdir()
+        (source / "out" / "report.pdf").write_text("new built version")
+
+        output_zip = tmp_path / "out.zip"
+        config = PackagerConfig(
+            source=source,
+            output=output_zip,
+            name="proj",
+            preset_name="report",
+            rules=["out/", "!out/*.pdf"],
+            flat=True,
+            force=True,
+        )
+        ZipPackager(config).package()
+
+        with zipfile.ZipFile(output_zip, "r") as zf:
+            names = zf.namelist()
+            assert names.count("report.pdf") == 1
+            assert zf.read("report.pdf").decode("utf-8") == "new built version"
