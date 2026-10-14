@@ -5,8 +5,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.interpreter import RuleInterpreter
 from zipdir.models import PresetModel, ScopedRule
+from zipdir.squeezer import RuleInterpreter
 
 DEFAULT_PRESET_DIRS: list[Path] = [
     Path(__file__).resolve().parent.parent / "presets",

@@ -5,8 +5,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from zipdir.interpreter import RuleInterpreter
 from zipdir.models import EvaluationResult, IgnoreRule, RuleKind, ScopedRule
+from zipdir.squeezer import RuleInterpreter
 
 
 @dataclass

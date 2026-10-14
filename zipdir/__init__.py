@@ -3,7 +3,7 @@
 from zipdir.cli import ZipdirCommand, app, package
 from zipdir.evaluator import PathEvaluator, evaluate_path
 from zipdir.glob import GlobExpression
-from zipdir.interpreter import RuleInterpreter, compile_rule, squeeze_rules
+from zipdir.interpreter import compile_rule
 from zipdir.models import (
     EvaluationResult,
     IgnoreRule,
@@ -22,6 +22,7 @@ from zipdir.presets import (
     load_presets,
     load_raw_zipignore_preset,
 )
+from zipdir.squeezer import RuleInterpreter, squeeze_rules
 from zipdir.ui import ConsoleReporter, format_size
 
 __all__ = [

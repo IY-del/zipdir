@@ -1,4 +1,4 @@
-"""4-component pattern matching, rule compilation, and compile-time rule squeezing."""
+"""4-component pattern matching and base rule compilation."""
 
 import re
 from collections.abc import Sequence
@@ -16,7 +16,9 @@ RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$"
 
 
 class RuleInterpreter:
-    """Interprets, squeezes, and compiles .zipignore rules in a unified pipeline."""
+    """Base interpreter that parses 4-component syntax and compiles .zipignore rules."""
+
+    glob_compiler: GlobExpression
 
     def __init__(self, glob_compiler: GlobExpression | None = None) -> None:
         self.glob_compiler = glob_compiler or GlobExpression()
@@ -67,71 +69,18 @@ class RuleInterpreter:
             return None
         return self._build_rule(line, parsed, scope)
 
-    def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
-        """Squeeze rule lines by pattern and scope: later rules with identical patterns
-        within the same scope eat earlier rules (compile-time phagocytosis).
-        """
-        squeezed: list[str | ScopedRule] = []
-        seen: dict[tuple[PurePosixPath, str], int] = {}
-        for item in rules:
-            scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
-            line = item.rule if isinstance(item, ScopedRule) else item
-            parsed = self.parse_components(line)
-            if parsed is None:
-                continue
-            key = (scope, parsed.pattern)
-            if key in seen:
-                squeezed[seen[key]] = item
-            else:
-                seen[key] = len(squeezed)
-                squeezed.append(item)
-        return squeezed
-
-    def compile_all(
-        self, rules: Sequence[str | ScopedRule | IgnoreRule], *, squeeze: bool = False
-    ) -> tuple[IgnoreRule, ...]:
-        """Compile a sequence of raw or scoped rules into IgnoreRule objects.
-
-        When `squeeze=True`, performs compile-time phagocytosis by (scope, pattern) in a
-        single pass without re-parsing rule strings.
-        """
-        if not squeeze:
-            compiled: list[IgnoreRule] = []
-            for item in rules:
-                if isinstance(item, IgnoreRule):
-                    compiled.append(item)
-                elif isinstance(item, ScopedRule):
-                    if (r := self.interpret(item.rule, scope=item.scope)) is not None:
-                        compiled.append(r)
-                elif (r := self.interpret(item)) is not None:
-                    compiled.append(r)
-            return tuple(compiled)
-
-        staged: list[tuple[str, ParsedRule, PurePosixPath] | IgnoreRule] = []
-        seen: dict[tuple[PurePosixPath, str], int] = {}
-
+    def compile_all(self, rules: Sequence[str | ScopedRule | IgnoreRule]) -> tuple[IgnoreRule, ...]:
+        """Compile a sequence of raw or scoped rules into IgnoreRule objects."""
+        compiled: list[IgnoreRule] = []
         for item in rules:
             if isinstance(item, IgnoreRule):
-                key = (item.scope, item.pattern)
-                entry: tuple[str, ParsedRule, PurePosixPath] | IgnoreRule = item
-            else:
-                scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
-                line = item.rule if isinstance(item, ScopedRule) else item
-                parsed = self.parse_components(line)
-                if parsed is None or not parsed.pattern:
-                    continue
-                key = (scope, parsed.pattern)
-                entry = (line, parsed, scope)
-
-            if key in seen:
-                staged[seen[key]] = entry
-            else:
-                seen[key] = len(staged)
-                staged.append(entry)
-
-        return tuple(
-            entry if isinstance(entry, IgnoreRule) else self._build_rule(*entry) for entry in staged
-        )
+                compiled.append(item)
+            elif isinstance(item, ScopedRule):
+                if (r := self.interpret(item.rule, scope=item.scope)) is not None:
+                    compiled.append(r)
+            elif (r := self.interpret(item)) is not None:
+                compiled.append(r)
+        return tuple(compiled)
 
     def _build_rule(self, raw: str, parsed: ParsedRule, scope: PurePosixPath) -> IgnoreRule:
         regex, is_dir_only, has_slash = self.glob_compiler.interpret(parsed.pattern)
@@ -150,8 +99,3 @@ class RuleInterpreter:
 def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
     """Compile a single .zipignore rule line into an IgnoreRule."""
     return RuleInterpreter().interpret(line, scope=scope)
-
-
-def squeeze_rules(rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
-    """Squeeze rule lines by pattern and scope."""
-    return RuleInterpreter().squeeze(rules)
