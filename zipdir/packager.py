@@ -52,10 +52,20 @@ class ZipPackager:
         return False
 
     def collect_members(self) -> Iterator[tuple[Path, str]]:
-        """Traverse source directory and yield (filesystem_path, arcname) pairs."""
+        """Traverse source directory and yield (filesystem_path, arcname) pairs.
+
+        Performs member-level phagocytosis when multiple source files map to the same
+        archive path (`arcname`), allowing later/rescued entries to replace earlier ones.
+        """
         prefix = PurePosixPath() if self.config.flat else PurePosixPath(self.config.name)
+        staged_entries: list[tuple[Path, str]] = []
+        seen_arcnames: dict[str, int] = {}
+        rescued_by_arcname: dict[str, tuple[str, str]] = {}
+
         if not self.config.flat:
-            yield self.config.source, prefix.as_posix() + "/"
+            root_arc = prefix.as_posix() + "/"
+            seen_arcnames[root_arc] = 0
+            staged_entries.append((self.config.source, root_arc))
 
         for dirpath, dirnames, filenames in self.config.source.walk(follow_symlinks=False):
             rel_dir = dirpath.relative_to(self.config.source)
@@ -112,11 +122,31 @@ class ZipPackager:
                 if result.arc_path is None:
                     continue
 
-                if result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE:
-                    self.rescued_files.append((file_posix.as_posix(), result.arc_path.as_posix()))
-
                 full_arcname = (prefix / result.arc_path).as_posix()
-                yield file_path, full_arcname
+                is_rescued = (
+                    result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE
+                )
+
+                if full_arcname in seen_arcnames:
+                    staged_entries[seen_arcnames[full_arcname]] = (file_path, full_arcname)
+                else:
+                    seen_arcnames[full_arcname] = len(staged_entries)
+                    staged_entries.append((file_path, full_arcname))
+
+                if is_rescued:
+                    rescued_by_arcname[full_arcname] = (
+                        file_posix.as_posix(),
+                        result.arc_path.as_posix(),
+                    )
+                else:
+                    rescued_by_arcname.pop(full_arcname, None)
+
+        self.rescued_files = [
+            rescued_by_arcname[arcname]
+            for _, arcname in staged_entries
+            if arcname in rescued_by_arcname
+        ]
+        yield from staged_entries
 
     def write_archive(self, path: Path, entries: Sequence[tuple[Path, str]]) -> None:
         """Write member files into the target ZIP archive directly."""

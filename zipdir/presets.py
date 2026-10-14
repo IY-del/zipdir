@@ -148,6 +148,54 @@ class PresetCatalog:
         final_rules = [r if isinstance(r, str) else r.rule for r in squeezed]
         return inherited_desc, final_rules, model.source_path
 
+    def _resolve_extended_rules(
+        self,
+        extends: Sequence[str],
+        base_dir: Path,
+        loaded_presets: Mapping[str, PresetModel],
+        visited_files: set[Path] | None = None,
+    ) -> list[str]:
+        """Resolve `# inherit:` / `# extends:` / `# include:` targets (presets or relative ignore files)."""
+        seen_files = set(visited_files) if visited_files is not None else set()
+        resolved_rules: list[str] = []
+
+        for target in extends:
+            if target in loaded_presets:
+                for r in loaded_presets[target].rules:
+                    if r not in resolved_rules:
+                        resolved_rules.append(r)
+                continue
+
+            expanded = Path(target).expanduser()
+            candidate = expanded if expanded.is_absolute() else (base_dir / expanded)
+            if candidate.is_file():
+                canon = candidate.resolve()
+                if canon in seen_files:
+                    raise ValueError(f"Circular dependency in ignore file inheritance: {candidate}")
+                next_seen = seen_files | {canon}
+                included_model = self.parse_file(canon)
+                if included_model.extends:
+                    parent_rules = self._resolve_extended_rules(
+                        included_model.extends,
+                        canon.parent,
+                        loaded_presets,
+                        next_seen,
+                    )
+                    for r in parent_rules:
+                        if r not in resolved_rules:
+                            resolved_rules.append(r)
+                for r in included_model.rules:
+                    if r not in resolved_rules:
+                        resolved_rules.append(r)
+                continue
+
+            print(
+                f"zipdir: warning: preset '{target}' declared in .zipignore not found",
+                file=sys.stderr,
+            )
+
+        return resolved_rules
+
     def discover_sub_zipignores(self, source: Path) -> list[tuple[PurePosixPath, Path]]:
         """Discover all .zipignore files in subdirectories under source, sorted by depth."""
         found: list[tuple[PurePosixPath, Path]] = []
@@ -193,9 +241,14 @@ class PresetCatalog:
                 preset_path = Path(preset).expanduser()
                 if preset not in loaded_presets and preset_path.is_file():
                     custom_model = self.parse_file(preset_path)
-                    for parent in custom_model.extends:
-                        if parent in loaded_presets:
-                            base_rules.extend(loaded_presets[parent].rules)
+                    base_rules.extend(
+                        self._resolve_extended_rules(
+                            custom_model.extends,
+                            preset_path.parent,
+                            loaded_presets,
+                            {preset_path.resolve()},
+                        )
+                    )
                     base_rules.extend(custom_model.rules)
                     effective_preset_name = custom_model.name or preset_path.name
                 elif preset in loaded_presets:
@@ -204,25 +257,44 @@ class PresetCatalog:
                     available = ", ".join(loaded_presets.keys())
                     raise ValueError(f"Unknown preset '{preset}'. Available: {available}")
             elif local_extends:
-                for parent in local_extends:
-                    if parent in loaded_presets:
-                        for r in loaded_presets[parent].rules:
-                            if r not in base_rules:
-                                base_rules.append(r)
-                    else:
-                        print(
-                            f"zipdir: warning: preset '{parent}' declared in .zipignore not found",
-                            file=sys.stderr,
-                        )
+                base_rules.extend(
+                    self._resolve_extended_rules(
+                        local_extends,
+                        source,
+                        loaded_presets,
+                        {local_zipignore.resolve()} if local_zipignore.is_file() else None,
+                    )
+                )
             elif "clean" in loaded_presets:
                 base_rules.extend(loaded_presets["clean"].rules)
 
         tier1_rules = [ScopedRule(rule=p) for p in base_rules]
-        tier2_rules = [ScopedRule(rule=r) for r in local_rules]
+
+        tier2_raw: list[str] = []
+        if preset is not None and local_extends:
+            tier2_raw.extend(
+                self._resolve_extended_rules(
+                    local_extends,
+                    source,
+                    loaded_presets,
+                    {local_zipignore.resolve()},
+                )
+            )
+        tier2_raw.extend(local_rules)
+        tier2_rules = [ScopedRule(rule=r) for r in tier2_raw]
 
         tier3_rules: list[ScopedRule] = []
         for rel_dir, sub_file in self.discover_sub_zipignores(source):
             sub_model = self.parse_file(sub_file)
+            if sub_model.extends:
+                inherited_sub_rules = self._resolve_extended_rules(
+                    sub_model.extends,
+                    sub_file.parent,
+                    loaded_presets,
+                    {sub_file.resolve()},
+                )
+                for r in inherited_sub_rules:
+                    tier3_rules.append(ScopedRule(scope=rel_dir, rule=r))
             for r in sub_model.rules:
                 tier3_rules.append(ScopedRule(scope=rel_dir, rule=r))
 
