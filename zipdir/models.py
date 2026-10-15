@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from zipdir.models.interface import (
+from zipdir.interfaces.models import (
     DEvaluationResult,
     DIgnoreRule,
     DPackagerConfig,

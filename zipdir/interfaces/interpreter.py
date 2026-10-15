@@ -3,8 +3,8 @@
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 
-from zipdir.glob.interface import IGlobCompiler
-from zipdir.models.interface import (
+from zipdir.interfaces.glob import IGlobCompiler
+from zipdir.interfaces.models import (
     DIgnoreRule,
     DParsedRule,
     DScopedRule,

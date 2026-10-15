@@ -3,7 +3,7 @@
 import re
 from collections.abc import Callable, Mapping
 
-from zipdir.models.interface import MInterface
+from zipdir.interfaces.models import MInterface
 
 
 class MGlobCompiler(MInterface):
