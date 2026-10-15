@@ -1,27 +1,10 @@
-"""Interface and FactoryMethod metaclass for glob pattern compilation."""
+"""Interface for glob expression compilation."""
 
 import re
-from collections.abc import Callable, Mapping
-
-from zipdir.interfaces.models import MInterface
 
 
-class MGlobCompiler(MInterface):
-    """FactoryMethod metaclass for IGlobCompiler."""
+class IGlobCompiler:
+    """Interface for compiling glob expressions into regex patterns."""
 
-    def __call__(cls, *args: object, **kwargs: object) -> "IGlobCompiler":
-        return super().__call__(*args, **kwargs)  # type: ignore[return-value]
-
-
-class DGlobCompiler:
-    """State invariant for gitignore glob compilers."""
-
-    token_pattern: re.Pattern[str]
-    translators: Mapping[str, Callable[[str], str]]
-
-
-class IGlobCompiler(DGlobCompiler, metaclass=MGlobCompiler):
-    """Nominal interface for compiling gitignore-style glob patterns into regular expressions."""
-
-    def interpret(self, pattern: str) -> tuple[re.Pattern[str], bool, bool]:
+    def compile(self, pattern: str) -> re.Pattern[str]:
         raise NotImplementedError

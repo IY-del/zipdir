@@ -1,77 +1,56 @@
-"""Interfaces and FactoryMethod metaclass for runtime path evaluation and 3-tier remapping."""
+"""Interfaces for path evaluation against ignore rules and destination remapping."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from zipdir.interfaces.models import (
-    DEvaluationResult,
-    DIgnoreRule,
-    MInterface,
-    RuleKind,
-)
+from zipdir.interfaces.glob import IGlobCompiler
+from zipdir.models import EvaluationResult, IgnoreRule, RuleKind
 
 
-class DEvaluationState:
-    """Mutable state invariant accumulated across ancestor and target path evaluation."""
-
-    is_excluded: bool
-    shallowest_excluded_ancestor: PurePosixPath | None
-    excluded_by: DIgnoreRule | None
-    rescued_by: DIgnoreRule | None
-
-
-class DRemapContext:
-    """Data contract and invariant for 3-tier path remapping context."""
+@dataclass(frozen=True)
+class RemapContext:
+    """Context holding evaluation parameters for path remapping."""
 
     rel_path: PurePosixPath
-    rescued_by: DIgnoreRule
-    shallowest_excluded_ancestor: PurePosixPath | None
-    sub_path: PurePosixPath
-    anchor_parent: PurePosixPath
+    rule: IgnoreRule
+    target: str
 
 
 class IRuleTransition:
-    """Nominal Strategy interface for applying a matched rule to DEvaluationState."""
+    """Strategy interface for state transitions triggered by matched rules."""
 
-    def apply(
+    def transition(
         self,
-        state: DEvaluationState,
-        rule: DIgnoreRule,
-        ancestor: PurePosixPath | None = None,
-    ) -> None:
+        current_excluded: bool,
+        current_arc: PurePosixPath | None,
+        rule: IgnoreRule,
+        remap_fn: object,
+        rel_path: PurePosixPath,
+    ) -> tuple[bool, PurePosixPath | None]:
         raise NotImplementedError
 
 
 class IRemapStrategy:
-    """Nominal Strategy interface for resolving 3-tier destination archive paths."""
+    """Strategy interface for destination target path remapping."""
 
-    def matches(self, target: str) -> bool:
-        raise NotImplementedError
-
-    def remap(self, ctx: DRemapContext) -> PurePosixPath:
+    def remap(self, context: RemapContext) -> PurePosixPath | None:
         raise NotImplementedError
 
 
-class MPathEvaluator(MInterface):
-    """FactoryMethod metaclass for IPathEvaluator."""
+class IPathEvaluator:
+    """Interface for evaluating filesystem paths against ignore rules."""
 
-    def __call__(cls, *args: object, **kwargs: object) -> "IPathEvaluator":
-        return super().__call__(*args, **kwargs)  # type: ignore[return-value]
-
-
-class DPathEvaluator:
-    """State invariant for runtime path evaluators."""
-
-    rules: tuple[DIgnoreRule, ...]
+    glob_compiler: IGlobCompiler
+    rules: tuple[IgnoreRule, ...]
     transitions: Mapping[RuleKind, IRuleTransition]
-    remap_strategies: Sequence[IRemapStrategy]
+    remap_strategies: Mapping[str, IRemapStrategy]
 
-
-class IPathEvaluator(DPathEvaluator, metaclass=MPathEvaluator):
-    """Nominal interface for evaluating relative paths and pruning directories."""
-
-    def evaluate(self, rel_path: PurePosixPath, is_dir: bool = False) -> DEvaluationResult:
+    def evaluate(self, rel_path: PurePosixPath, is_dir: bool = False) -> EvaluationResult:
         raise NotImplementedError
 
-    def should_prune(self, rel_dir: PurePosixPath) -> bool:
+    def is_directory_pruned(self, dir_rel_path: PurePosixPath) -> bool:
+        raise NotImplementedError
+
+    def remap(self, rel_path: PurePosixPath, rule: IgnoreRule) -> PurePosixPath | None:
         raise NotImplementedError

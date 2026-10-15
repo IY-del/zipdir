@@ -1,74 +1,30 @@
-"""Interfaces package aggregating per-domain D* contracts, I* nominal interfaces, and M* factories."""
+"""interfaces: Pure behavioral contracts and strategies for zipdir."""
 
 from zipdir.interfaces.evaluator import (
-    DEvaluationState,
-    DPathEvaluator,
-    DRemapContext,
     IPathEvaluator,
     IRemapStrategy,
     IRuleTransition,
-    MPathEvaluator,
+    RemapContext,
 )
-from zipdir.interfaces.glob import DGlobCompiler, IGlobCompiler, MGlobCompiler
+from zipdir.interfaces.glob import IGlobCompiler
 from zipdir.interfaces.interpreter import (
-    DRuleInterpreter,
-    DRuleSqueezer,
-    DSqueezeBuffer,
     IRuleInterpreter,
     IRuleSqueezer,
     ISqueezeStrategy,
-    MRuleInterpreter,
-    MRuleSqueezer,
-)
-from zipdir.interfaces.models import (
-    DEvaluationResult,
-    DIgnoreRule,
-    DPackagerConfig,
-    DParsedRule,
-    DPreset,
-    DResolvedOutput,
-    DScopedRule,
-    MInterface,
-    RuleKind,
+    SqueezeBuffer,
 )
 from zipdir.interfaces.output import (
-    DOutputResolver,
     IOutputResolver,
     IOutputTargetStrategy,
-    MOutputResolver,
 )
 from zipdir.interfaces.packager import (
-    DPackager,
     IArchiveEntryWriter,
     IPackager,
-    MPackager,
 )
-from zipdir.interfaces.presets import (
-    DPresetCatalog,
-    IPresetCatalog,
-    MPresetCatalog,
-)
-from zipdir.interfaces.ui import DReporter, IReporter, MReporter
+from zipdir.interfaces.presets import IPresetCatalog
+from zipdir.interfaces.ui import IReporter
 
 __all__ = [
-    "DEvaluationResult",
-    "DEvaluationState",
-    "DGlobCompiler",
-    "DIgnoreRule",
-    "DOutputResolver",
-    "DPackager",
-    "DPackagerConfig",
-    "DParsedRule",
-    "DPathEvaluator",
-    "DPreset",
-    "DPresetCatalog",
-    "DRemapContext",
-    "DReporter",
-    "DResolvedOutput",
-    "DRuleInterpreter",
-    "DRuleSqueezer",
-    "DScopedRule",
-    "DSqueezeBuffer",
     "IArchiveEntryWriter",
     "IGlobCompiler",
     "IOutputResolver",
@@ -82,14 +38,6 @@ __all__ = [
     "IRuleSqueezer",
     "IRuleTransition",
     "ISqueezeStrategy",
-    "MGlobCompiler",
-    "MInterface",
-    "MOutputResolver",
-    "MPackager",
-    "MPathEvaluator",
-    "MPresetCatalog",
-    "MReporter",
-    "MRuleInterpreter",
-    "MRuleSqueezer",
-    "RuleKind",
+    "RemapContext",
+    "SqueezeBuffer",
 ]

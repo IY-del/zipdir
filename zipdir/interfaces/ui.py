@@ -1,45 +1,15 @@
-"""Interfaces and FactoryMethod metaclass for terminal/UI reporting."""
+"""Interface for packaging progress reporting."""
 
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from zipdir.interfaces.models import DPackagerConfig, DPreset, MInterface
+from zipdir.models import PackagerConfig
 
 
-class MReporter(MInterface):
-    """FactoryMethod metaclass for IReporter."""
+class IReporter:
+    """Interface for console output reporting during packaging."""
 
-    def __call__(cls, *args: object, **kwargs: object) -> "IReporter":
-        return super().__call__(*args, **kwargs)  # type: ignore[return-value]
-
-
-class DReporter:
-    """State invariant for terminal/UI reporters."""
-
-    use_color: bool
-
-
-class IReporter(DReporter, metaclass=MReporter):
-    """Nominal interface for reporting preset listings, dry-run previews, and summaries."""
-
-    def print_presets(self, presets: Mapping[str, DPreset]) -> None:
+    def report_start(self, config: PackagerConfig) -> None:
         raise NotImplementedError
 
-    def print_dry_run(
-        self,
-        config: DPackagerConfig,
-        entries: Sequence[tuple[Path, str]],
-        rescued_files: Sequence[tuple[str, str]],
-        excluded_files: Sequence[str],
-    ) -> None:
-        raise NotImplementedError
-
-    def print_summary(
-        self,
-        config: DPackagerConfig,
-        output: Path,
-        entries: Sequence[tuple[Path, str]],
-        rescued_files: Sequence[tuple[str, str]],
-        excluded_files: Sequence[str],
-    ) -> None:
+    def report_summary(self, path: Path, size: int) -> None:
         raise NotImplementedError
