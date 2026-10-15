@@ -1,4 +1,4 @@
-"""Core packaging engine (direct-to-archive writer with non-greedy pruning)."""
+"""Core packaging engine (direct-to-archive writer with non-greedy pruning and Strategy/Bridge)."""
 
 import os
 import stat
@@ -8,16 +8,75 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path, PurePosixPath
 
 from zipdir.evaluator import PathEvaluator
-from zipdir.models import IgnoreRule, PackagerConfig, RuleKind
+from zipdir.models import (
+    IgnoreRule,
+    IPackager,
+    IPathEvaluator,
+    IReporter,
+    PackagerConfig,
+    RuleKind,
+)
 from zipdir.ui import ConsoleReporter
 
 
-class ZipPackager:
-    """Traverses source directory using PathEvaluator and writes ZIP archives atomically."""
+class IArchiveEntryWriter:
+    """Nominal Strategy interface for writing an entry into a ZipFile archive."""
+
+    def matches(self, item: Path, source: Path) -> bool:
+        raise NotImplementedError
+
+    def write(self, archive: zipfile.ZipFile, item: Path, arcname: str) -> None:
+        raise NotImplementedError
+
+
+class RootDirArchiveWriter(IArchiveEntryWriter):
+    """Strategy for writing the enclosing top-level root directory entry."""
+
+    def matches(self, item: Path, source: Path) -> bool:
+        return item == source
+
+    def write(self, archive: zipfile.ZipFile, item: Path, arcname: str) -> None:
+        info = zipfile.ZipInfo(arcname)
+        archive.writestr(info, "")
+
+
+class SymlinkArchiveWriter(IArchiveEntryWriter):
+    """Strategy for preserving symbolic links inside the ZIP archive."""
+
+    def matches(self, item: Path, source: Path) -> bool:
+        return item != source and item.is_symlink()
+
+    def write(self, archive: zipfile.ZipFile, item: Path, arcname: str) -> None:
+        info = zipfile.ZipInfo(arcname)
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(info, item.readlink().as_posix())
+
+
+class RegularFileArchiveWriter(IArchiveEntryWriter):
+    """Default fallback Strategy for writing regular files into the ZIP archive."""
+
+    def matches(self, item: Path, source: Path) -> bool:
+        return True
+
+    def write(self, archive: zipfile.ZipFile, item: Path, arcname: str) -> None:
+        archive.write(item, arcname)
+
+
+DEFAULT_ENTRY_WRITERS: tuple[IArchiveEntryWriter, ...] = (
+    RootDirArchiveWriter(),
+    SymlinkArchiveWriter(),
+    RegularFileArchiveWriter(),
+)
+
+
+class ZipPackager(IPackager):
+    """Traverses source directory using IPathEvaluator and writes ZIP archives atomically."""
 
     config: PackagerConfig
-    evaluator: PathEvaluator
-    reporter: ConsoleReporter
+    evaluator: IPathEvaluator
+    reporter: IReporter
+    entry_writers: Sequence[IArchiveEntryWriter]
     compiled_rules: list[IgnoreRule]
     rescued_files: list[tuple[str, str]]
     excluded_files: list[str]
@@ -25,12 +84,16 @@ class ZipPackager:
     def __init__(
         self,
         config: PackagerConfig,
-        evaluator: PathEvaluator | None = None,
-        reporter: ConsoleReporter | None = None,
+        evaluator: IPathEvaluator | None = None,
+        reporter: IReporter | None = None,
+        entry_writers: Sequence[IArchiveEntryWriter] | None = None,
     ) -> None:
         self.config = config
         self.evaluator = evaluator or PathEvaluator(config.rules)
         self.reporter = reporter or ConsoleReporter()
+        self.entry_writers = (
+            entry_writers if entry_writers is not None else DEFAULT_ENTRY_WRITERS
+        )
         self.compiled_rules = list(self.evaluator.rules)
         self.rescued_files = []
         self.excluded_files = []
@@ -43,7 +106,6 @@ class ZipPackager:
         output_resolved = self.config.output.resolve()
         if resolved == output_resolved:
             return True
-        # Also skip the base <name>.zip if output fell back to <name>_<timestamp>.zip in the same dir
         if resolved.parent == output_resolved.parent and resolved.name == f"{self.config.name}.zip":
             if output_resolved.name.startswith(
                 f"{self.config.name}_"
@@ -149,23 +211,16 @@ class ZipPackager:
         yield from staged_entries
 
     def write_archive(self, path: Path, entries: Sequence[tuple[Path, str]]) -> None:
-        """Write member files into the target ZIP archive directly."""
+        """Write member files into the target ZIP archive via IArchiveEntryWriter strategies."""
         method = zipfile.ZIP_STORED if self.config.compression == 0 else zipfile.ZIP_DEFLATED
         with zipfile.ZipFile(
             path, "w", compression=method, compresslevel=self.config.compression
         ) as archive:
             for item, arcname in entries:
-                if item == self.config.source:
-                    info = zipfile.ZipInfo(arcname)
-                    archive.writestr(info, "")
-                    continue
-                if item.is_symlink():
-                    info = zipfile.ZipInfo(arcname)
-                    info.create_system = 3
-                    info.external_attr = (stat.S_IFLNK | 0o777) << 16
-                    archive.writestr(info, item.readlink().as_posix())
-                else:
-                    archive.write(item, arcname)
+                for writer in self.entry_writers:
+                    if writer.matches(item, self.config.source):
+                        writer.write(archive, item, arcname)
+                        break
 
     def package(self) -> Path:
         """Evaluate paths, handle dry-run, or atomically write ZIP archive."""

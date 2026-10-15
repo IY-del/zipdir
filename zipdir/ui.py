@@ -5,7 +5,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from zipdir.models import PackagerConfig, PresetModel
+from zipdir.models import IReporter, PackagerConfig, PresetModel
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -44,7 +44,7 @@ def format_size(num_bytes: int | float) -> str:
     return f"{size:.1f} TB"
 
 
-class ConsoleReporter:
+class ConsoleReporter(IReporter):
     """Renders packaging summaries, dry-run previews, and preset listings to the terminal."""
 
     use_color: bool

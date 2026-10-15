@@ -7,7 +7,14 @@ from typing import Annotated
 import typer
 from typer.core import TyperCommand
 
-from zipdir.models import PackagerConfig, PresetModel
+from zipdir.models import (
+    IOutputResolver,
+    IPackager,
+    IPresetCatalog,
+    IReporter,
+    PackagerConfig,
+    PresetModel,
+)
 from zipdir.output import OutputResolver, resolve_output_path
 from zipdir.packager import ZipPackager
 from zipdir.presets import PresetCatalog
@@ -18,7 +25,8 @@ class ZipdirCommand(TyperCommand):
     """Custom Typer command that normalizes bare `-o` / `--output` flags to `""` (source.parent)."""
 
     def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
-        normalized = OutputResolver().normalize_cli_args(args)
+        resolver: IOutputResolver = OutputResolver()
+        normalized = resolver.normalize_cli_args(args)
         return super().parse_args(ctx, normalized)
 
 
@@ -30,9 +38,13 @@ app = typer.Typer(
 )
 
 
-def print_presets(presets: dict[str, PresetModel]) -> None:
+def print_presets(
+    presets: dict[str, PresetModel],
+    reporter: IReporter | None = None,
+) -> None:
     """Display available presets and their configurations."""
-    ConsoleReporter().print_presets(presets)
+    active_reporter: IReporter = reporter or ConsoleReporter()
+    active_reporter.print_presets(presets)
 
 
 @app.command(
@@ -144,8 +156,8 @@ def package(
         typer.Option("--dry-run", help="Show resulting members without creating ZIP"),
     ] = False,
 ) -> None:
-    catalog = PresetCatalog()
-    reporter = ConsoleReporter()
+    catalog: IPresetCatalog = PresetCatalog()
+    reporter: IReporter = ConsoleReporter()
     presets = catalog.load_all()
 
     if list_presets:
@@ -217,7 +229,7 @@ def package(
         verbose=verbose,
     )
 
-    packager = ZipPackager(config, reporter=reporter)
+    packager: IPackager = ZipPackager(config, reporter=reporter)
     try:
         packager.package()
     except (FileExistsError, FileNotFoundError, ValueError) as e:
