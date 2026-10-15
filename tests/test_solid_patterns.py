@@ -1,4 +1,4 @@
-"""Unit tests verifying interfaces/ package separation, progressive inheritance (OCP), TemplateMethod decomposition, D* invariants, and Strategy/Bridge patterns."""
+"""Unit tests verifying interfaces/ package separation, progressive inheritance (OCP), TemplateMethod decomposition, match usage, and Strategy/Bridge patterns."""
 
 import ast
 import inspect
@@ -17,7 +17,6 @@ import zipdir.glob.gitignore
 import zipdir.interfaces.evaluator
 import zipdir.interfaces.glob
 import zipdir.interfaces.interpreter
-import zipdir.interfaces.models
 import zipdir.interfaces.output
 import zipdir.interfaces.packager
 import zipdir.interfaces.presets
@@ -43,21 +42,6 @@ import zipdir.ui.verbose
 from zipdir import (
     ArchiveRootRemapStrategy,
     ConsoleReporter,
-    DEvaluationResult,
-    DGlobCompiler,
-    DIgnoreRule,
-    DOutputResolver,
-    DPackager,
-    DPackagerConfig,
-    DParsedRule,
-    DPathEvaluator,
-    DPreset,
-    DPresetCatalog,
-    DReporter,
-    DResolvedOutput,
-    DRuleInterpreter,
-    DRuleSqueezer,
-    DScopedRule,
     EvaluationResult,
     ExileRemapStrategy,
     GlobExpression,
@@ -70,16 +54,7 @@ from zipdir import (
     IRemapStrategy,
     IReporter,
     IRuleInterpreter,
-    IRuleSqueezer,
     LocalScopeRemapStrategy,
-    MGlobCompiler,
-    MOutputResolver,
-    MPackager,
-    MPathEvaluator,
-    MPresetCatalog,
-    MReporter,
-    MRuleInterpreter,
-    MRuleSqueezer,
     OutputResolver,
     OverwriteSqueezeStrategy,
     PackagerConfig,
@@ -93,7 +68,6 @@ from zipdir import (
     ResolvedOutput,
     RuleInterpreter,
     RuleKind,
-    ScopedRule,
     TargetedRedeleteSqueezeStrategy,
     ZipPackager,
     compile_rule,
@@ -104,9 +78,8 @@ class TestInterfacesDirectoryAndProgressiveInheritance:
     """Verifies dedicated interfaces/ directory separation and progressive inheritance (Sections 3.2, 3.4, 3.5, 4.6, 8.1)."""
 
     def test_interfaces_package_files_are_separated_and_import_no_concretes(self) -> None:
-        """All interfaces reside under zipdir/interfaces/*.py and never import concrete modules."""
+        """All interfaces reside under zipdir/interfaces/*.py and import only interfaces or models."""
         interface_modules = [
-            zipdir.interfaces.models,
             zipdir.interfaces.glob,
             zipdir.interfaces.interpreter,
             zipdir.interfaces.evaluator,
@@ -124,12 +97,14 @@ class TestInterfacesDirectoryAndProgressiveInheritance:
                     and node.module
                     and node.module.startswith("zipdir.")
                 ):
-                    assert node.module.startswith("zipdir.interfaces."), (
-                        f"{mod.__name__} must only import from zipdir.interfaces.*, got {node.module}"
+                    assert node.module == "zipdir.models" or node.module.startswith(
+                        "zipdir.interfaces."
+                    ), (
+                        f"{mod.__name__} must only import from zipdir.interfaces.* or zipdir.models, got {node.module}"
                     )
 
     def test_concrete_directories_contain_no_interface_definitions(self) -> None:
-        """Concrete feature directories must not define D*, I*, or M* interface classes."""
+        """Concrete feature directories must not define I* interface classes."""
         concrete_modules = [
             zipdir.models,
             zipdir.glob.base,
@@ -161,8 +136,10 @@ class TestInterfacesDirectoryAndProgressiveInheritance:
             tree = ast.parse(source)
             for node in tree.body:
                 if isinstance(node, ast.ClassDef):
-                    assert not node.name.startswith(("I", "D", "M")), (
-                        f"Interface/contract {node.name} must reside in zipdir/interfaces/, not {mod.__name__}"
+                    assert not (
+                        node.name.startswith("I") and len(node.name) > 1 and node.name[1].isupper()
+                    ), (
+                        f"Interface {node.name} must reside in zipdir/interfaces/, not {mod.__name__}"
                     )
 
     def test_cross_package_imports_target_only_interfaces_or_models(self) -> None:
@@ -290,18 +267,31 @@ class TestInterfacesDirectoryAndProgressiveInheritance:
         assert issubclass(zipdir.packager.base.ZipPackager, IPackager)
 
 
-class TestDataModelInvariants:
-    """Verifies D* data contracts and runtime class invariants."""
+class TestStructuralPatternMatchingUsage:
+    """Verifies active utilization of Python 3.10+ match statements across the codebase."""
 
-    def test_d_inheritance_hierarchy(self) -> None:
-        assert issubclass(ParsedRule, DParsedRule)
-        assert issubclass(IgnoreRule, DIgnoreRule)
-        assert issubclass(IgnoreRule, DParsedRule)
-        assert issubclass(EvaluationResult, DEvaluationResult)
-        assert issubclass(ResolvedOutput, DResolvedOutput)
-        assert issubclass(ScopedRule, DScopedRule)
-        assert issubclass(PresetModel, DPreset)
-        assert issubclass(PackagerConfig, DPackagerConfig)
+    def test_match_statements_present_in_core_modules(self) -> None:
+        """Verify that core modules use match/case statements for state transitions and AST parsing."""
+        modules_with_match = [
+            zipdir.models,
+            zipdir.interpreter.base,
+            zipdir.interpreter.squeezed,
+            zipdir.evaluator.base,
+            zipdir.evaluator.strategies,
+            zipdir.output.base,
+            zipdir.presets.base,
+            zipdir.presets.local,
+            zipdir.packager.base,
+        ]
+        for mod in modules_with_match:
+            source = inspect.getsource(mod)
+            tree = ast.parse(source)
+            match_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Match)]
+            assert len(match_nodes) >= 1, f"Expected match statements in {mod.__name__}, found none"
+
+
+class TestDataModelInvariants:
+    """Verifies domain data model runtime class invariants."""
 
     def test_parsed_rule_invariants(self) -> None:
         with pytest.raises(ValueError, match="pattern must be non-empty"):
@@ -357,36 +347,8 @@ class TestDataModelInvariants:
             )
 
 
-class TestNominalInterfacesAndFactoryMethod:
-    """Verifies I* nominal subtyping, M* FactoryMethod metaclasses, and Bridge DI."""
-
-    def test_nominal_interface_and_metaclass_subtyping(self) -> None:
-        assert issubclass(GlobExpression, (IGlobCompiler, DGlobCompiler))
-        assert isinstance(GlobExpression, MGlobCompiler)
-        assert issubclass(
-            RuleInterpreter, (IRuleSqueezer, DRuleSqueezer, IRuleInterpreter, DRuleInterpreter)
-        )
-        assert isinstance(RuleInterpreter, (MRuleSqueezer, MRuleInterpreter))
-        assert issubclass(PathEvaluator, (IPathEvaluator, DPathEvaluator))
-        assert isinstance(PathEvaluator, MPathEvaluator)
-        assert issubclass(OutputResolver, (IOutputResolver, DOutputResolver))
-        assert isinstance(OutputResolver, MOutputResolver)
-        assert issubclass(PresetCatalog, (IPresetCatalog, DPresetCatalog))
-        assert isinstance(PresetCatalog, MPresetCatalog)
-        assert issubclass(ConsoleReporter, (IReporter, DReporter))
-        assert isinstance(ConsoleReporter, MReporter)
-        assert issubclass(ZipPackager, (IPackager, DPackager))
-        assert isinstance(ZipPackager, MPackager)
-
-    def test_factory_method_instantiation_through_interface(self) -> None:
-        glob_inst = IGlobCompiler()
-        assert isinstance(glob_inst, GlobExpression)
-
-        squeezer_inst = IRuleSqueezer()
-        assert isinstance(squeezer_inst, RuleInterpreter)
-
-        evaluator_inst = IPathEvaluator(["*.log"])
-        assert isinstance(evaluator_inst, PathEvaluator)
+class TestBridgeAndStrategyPatterns:
+    """Verifies Strategy implementations and Bridge DI."""
 
     def test_bridge_custom_reporter_injection(self, tmp_path: Path) -> None:
         class RecordingReporter(IReporter):
@@ -395,12 +357,12 @@ class TestNominalInterfacesAndFactoryMethod:
                 self.dry_run_called = False
                 self.recorded_entries: list[str] = []
 
-            def print_presets(self, presets: Mapping[str, DPreset]) -> None:
+            def print_presets(self, presets: Mapping[str, PresetModel]) -> None:
                 pass
 
             def print_dry_run(
                 self,
-                config: DPackagerConfig,
+                config: PackagerConfig,
                 entries: Sequence[tuple[Path, str]],
                 rescued_files: Sequence[tuple[str, str]],
                 excluded_files: Sequence[str],
@@ -410,7 +372,7 @@ class TestNominalInterfacesAndFactoryMethod:
 
             def print_summary(
                 self,
-                config: DPackagerConfig,
+                config: PackagerConfig,
                 output: Path,
                 entries: Sequence[tuple[Path, str]],
                 rescued_files: Sequence[tuple[str, str]],
@@ -435,10 +397,6 @@ class TestNominalInterfacesAndFactoryMethod:
 
         assert reporter.dry_run_called
         assert reporter.recorded_entries == ["hello.txt"]
-
-
-class TestStrategyPatterns:
-    """Verifies Strategy implementations for remapping, squeezing, and output classification."""
 
     def test_remap_strategies_unit(self) -> None:
         rule = compile_rule("/dist!out/a.pdf")
@@ -468,7 +426,7 @@ class TestStrategyPatterns:
             def matches(self, target: str) -> bool:
                 return target == "custom_hook"
 
-            def remap(self, ctx: RemapContext) -> PurePosixPath:  # type: ignore[override]
+            def remap(self, ctx: RemapContext) -> PurePosixPath:
                 return PurePosixPath("hooked") / ctx.sub_path
 
         evaluator = PathEvaluator(
