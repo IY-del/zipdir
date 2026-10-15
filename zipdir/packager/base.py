@@ -45,9 +45,7 @@ class ZipPackager(IPackager):
         self.config = config
         self.evaluator = evaluator or create_evaluator(config.rules)
         self.reporter = reporter or create_reporter()
-        self.entry_writers = (
-            entry_writers if entry_writers is not None else DEFAULT_ENTRY_WRITERS
-        )
+        self.entry_writers = entry_writers if entry_writers is not None else DEFAULT_ENTRY_WRITERS
         self.compiled_rules = [
             r
             if isinstance(r, IgnoreRule)
@@ -130,9 +128,7 @@ class ZipPackager(IPackager):
         if result.is_excluded or result.arc_path is None:
             return None
         full_arcname = (prefix / result.arc_path).as_posix()
-        is_rescued = (
-            result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE
-        )
+        is_rescued = result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE
         return full_arcname, result.arc_path, is_rescued
 
     def _stage_member(

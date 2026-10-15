@@ -100,6 +100,7 @@ from zipdir.presets import (
     load_raw_zipignore_preset,
 )
 from zipdir.ui import ConsoleReporter, format_size
+
 from zipdir.cli import ZipdirCommand, app, package  # isort: skip
 
 __all__ = [

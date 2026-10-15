@@ -146,9 +146,7 @@ class ParentClimbRemapStrategy(IRemapStrategy):
         return target in ("..", "../") or target.startswith("../")
 
     def remap(self, ctx: DRemapContext) -> PurePosixPath:
-        current = (
-            PurePosixPath() if ctx.anchor_parent == PurePosixPath(".") else ctx.anchor_parent
-        )
+        current = PurePosixPath() if ctx.anchor_parent == PurePosixPath(".") else ctx.anchor_parent
         parts = [p for p in ctx.rescued_by.target.split("/") if p and p != "."]
         idx = 0
         while idx < len(parts) and parts[idx] == "..":

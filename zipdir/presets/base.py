@@ -120,9 +120,7 @@ class PresetCatalog(IPresetCatalog):
         local_file = source / ".zipignore"
         return self.parse_file(local_file) if local_file.is_file() else None
 
-    def _determine_preset_name(
-        self, preset: str | None, local_model: PresetModel | None
-    ) -> str:
+    def _determine_preset_name(self, preset: str | None, local_model: PresetModel | None) -> str:
         if preset is not None:
             return preset
         if local_model is not None and local_model.extends:
@@ -165,15 +163,11 @@ class PresetCatalog(IPresetCatalog):
     def _squeeze_cascade(self, combined: Sequence[ScopedRule]) -> list[str | ScopedRule]:
         squeezed = self.interpreter.squeeze(combined)
         return [
-            r
-            if isinstance(r, (str, ScopedRule))
-            else ScopedRule(scope=r.scope, rule=r.rule)
+            r if isinstance(r, (str, ScopedRule)) else ScopedRule(scope=r.scope, rule=r.rule)
             for r in squeezed
         ]
 
-    def _parse_comment_directive(
-        self, stripped: str, extends: list[str], description: str
-    ) -> str:
+    def _parse_comment_directive(self, stripped: str, extends: list[str], description: str) -> str:
         lower = stripped.lower()
         if any(k in lower for k in ("inherit:", "extends:", "include:")):
             val = stripped.split(":", 1)[1]

@@ -31,15 +31,11 @@ class ZipPackager(PhagocyticZipPackager):
 
     def _validate_output_target(self, output: Path) -> None:
         if not self.config.force and (output.exists() or output.is_symlink()):
-            raise FileExistsError(
-                f"Output already exists (use -f/--force to overwrite): {output}"
-            )
+            raise FileExistsError(f"Output already exists (use -f/--force to overwrite): {output}")
         if not output.parent.is_dir():
             raise FileNotFoundError(f"Output parent directory does not exist: {output.parent}")
 
-    def _write_atomic_archive(
-        self, output: Path, entries: list[tuple[Path, str]]
-    ) -> None:
+    def _write_atomic_archive(self, output: Path, entries: list[tuple[Path, str]]) -> None:
         fd, temp_file_str = tempfile.mkstemp(prefix=".zipdir_", suffix=".zip", dir=output.parent)
         os.close(fd)
         temp_path = Path(temp_file_str)

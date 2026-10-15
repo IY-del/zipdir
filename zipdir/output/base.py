@@ -25,9 +25,7 @@ class OutputResolver(IOutputResolver):
         self.cwd = cwd if cwd is not None else Path.cwd()
         self.timestamp_fn = timestamp_fn or (lambda: time.strftime("%Y%m%d_%H%M%S"))
         self.target_strategies = (
-            target_strategies
-            if target_strategies is not None
-            else DEFAULT_OUTPUT_TARGET_STRATEGIES
+            target_strategies if target_strategies is not None else DEFAULT_OUTPUT_TARGET_STRATEGIES
         )
 
     def normalize_cli_args(self, args: Sequence[str]) -> list[str]:

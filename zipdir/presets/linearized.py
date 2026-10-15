@@ -8,6 +8,8 @@ from zipdir.interfaces.models import DPreset
 from zipdir.models import PresetModel
 from zipdir.presets.base import (
     PresetCatalog as BasePresetCatalog,
+)
+from zipdir.presets.base import (
     _as_preset_model,
 )
 
@@ -81,9 +83,7 @@ class PresetCatalog(BasePresetCatalog):
         while active:
             candidate = self._select_c3_head(active)
             result.append(candidate)
-            active = [
-                rem for seq in active if (rem := [item for item in seq if item != candidate])
-            ]
+            active = [rem for seq in active if (rem := [item for item in seq if item != candidate])]
 
         return result
 
@@ -136,9 +136,7 @@ class PresetCatalog(BasePresetCatalog):
             curr_dir = base_dirs_by_key.get(node_key, base_dir)
             resolved_parents: list[str] = []
             for p_ref in model.extends:
-                p_key = self._resolve_parent_key(
-                    p_ref, curr_dir, models_by_key, base_dirs_by_key
-                )
+                p_key = self._resolve_parent_key(p_ref, curr_dir, models_by_key, base_dirs_by_key)
                 if p_key is not None and p_key not in resolved_parents:
                     resolved_parents.append(p_key)
             return list(reversed(resolved_parents))

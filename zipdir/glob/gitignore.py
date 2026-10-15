@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from zipdir.glob.base import (
     BASE_TOKEN_TRANSLATORS,
     GLOB_TOKEN_REGEX,
+)
+from zipdir.glob.base import (
     GlobExpression as BaseGlobExpression,
 )
 

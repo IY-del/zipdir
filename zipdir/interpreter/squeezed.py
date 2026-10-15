@@ -32,9 +32,7 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
     def squeeze(self, rules: Sequence[str | DScopedRule]) -> list[str | ScopedRule]:
         """Squeeze rule lines by pattern and scope with target-aware phagocytosis."""
         normalized = [
-            entry
-            for item in rules
-            if (entry := self._normalize_squeeze_item(item)) is not None
+            entry for item in rules if (entry := self._normalize_squeeze_item(item)) is not None
         ]
         return self._squeeze_staged(normalized)
 
@@ -46,9 +44,7 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
             return super().compile_all(rules)
 
         normalized = [
-            entry
-            for item in rules
-            if (entry := self._normalize_compile_item(item)) is not None
+            entry for item in rules if (entry := self._normalize_compile_item(item)) is not None
         ]
         staged = self._squeeze_staged(normalized)
         return tuple(
@@ -88,7 +84,11 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
                     scope=item.scope,
                 )
             )
-            return concrete.scope, ParsedRule(concrete.kind, concrete.target, concrete.pattern), concrete
+            return (
+                concrete.scope,
+                ParsedRule(concrete.kind, concrete.target, concrete.pattern),
+                concrete,
+            )
 
         scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
         line = item.rule if isinstance(item, DScopedRule) else item

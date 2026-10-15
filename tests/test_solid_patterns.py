@@ -119,7 +119,11 @@ class TestInterfacesDirectoryAndProgressiveInheritance:
             source = inspect.getsource(mod)
             tree = ast.parse(source)
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("zipdir."):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and node.module.startswith("zipdir.")
+                ):
                     assert node.module.startswith("zipdir.interfaces."), (
                         f"{mod.__name__} must only import from zipdir.interfaces.*, got {node.module}"
                     )
@@ -202,12 +206,16 @@ class TestInterfacesDirectoryAndProgressiveInheritance:
                 source = inspect.getsource(mod)
                 tree = ast.parse(source)
                 for node in ast.walk(tree):
-                    if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("zipdir."):
+                    if (
+                        isinstance(node, ast.ImportFrom)
+                        and node.module
+                        and node.module.startswith("zipdir.")
+                    ):
                         if node.module.startswith(own_prefix):
                             continue
-                        assert node.module == "zipdir.models" or node.module.startswith("zipdir.interfaces"), (
-                            f"{mod.__name__} directly imports external concrete module {node.module}"
-                        )
+                        assert node.module == "zipdir.models" or node.module.startswith(
+                            "zipdir.interfaces"
+                        ), f"{mod.__name__} directly imports external concrete module {node.module}"
 
     def test_progressive_inheritance_chains_and_ocp_decomposition(self) -> None:
         """Verifies progressive inheritance chains and TemplateMethod decomposition across all packages."""
