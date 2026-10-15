@@ -1,6 +1,9 @@
-"""Glob pattern compilation for gitignore-style patterns using token translation."""
+"""Glob pattern compilation for gitignore-style patterns using token translation strategies."""
 
 import re
+from collections.abc import Callable, Mapping
+
+from zipdir.models import IGlobCompiler
 
 # Gitignore glob tokens in priority order:
 # 1. '/**/' or '**/' -> directory recursive wildcard
@@ -27,13 +30,37 @@ GLOB_TOKEN_REGEX = re.compile(
 )
 
 
-class GlobExpression:
+def _translate_bracket(token: str) -> str:
+    inner = token[1:-1]
+    return f"[^{inner[1:]}]" if inner.startswith("!") else token
+
+
+DEFAULT_TOKEN_TRANSLATORS: dict[str, Callable[[str], str]] = {
+    "globstar_slash": lambda _: "(?:.*/)?",
+    "globstar": lambda _: ".*",
+    "star": lambda _: "[^/]*",
+    "question": lambda _: "[^/]",
+    "bracket": _translate_bracket,
+    "escape": lambda token: re.escape(token[1:]),
+    "meta": lambda token: "\\" + token,
+    "literal": lambda token: token,
+    "slash": lambda token: token,
+}
+
+
+class GlobExpression(IGlobCompiler):
     """Interprets gitignore-style glob pattern into a compiled regex and metadata."""
 
     token_pattern: re.Pattern[str]
+    translators: Mapping[str, Callable[[str], str]]
 
-    def __init__(self, token_pattern: re.Pattern[str] = GLOB_TOKEN_REGEX) -> None:
+    def __init__(
+        self,
+        token_pattern: re.Pattern[str] = GLOB_TOKEN_REGEX,
+        translators: Mapping[str, Callable[[str], str]] | None = None,
+    ) -> None:
         self.token_pattern = token_pattern
+        self.translators = translators if translators is not None else DEFAULT_TOKEN_TRANSLATORS
 
     def interpret(self, pattern: str) -> tuple[re.Pattern[str], bool, bool]:
         """Compile a glob pattern into (compiled_regex, is_dir_only, has_slash)."""
@@ -50,22 +77,9 @@ class GlobExpression:
         return re.compile(full_regex), is_dir_only, has_slash
 
     def _translate_token(self, match: re.Match[str]) -> str:
-        """Translate a single glob token into its regex equivalent."""
-        if match.group("globstar_slash"):
-            return "(?:.*/)?"
-        if match.group("globstar"):
-            return ".*"
-        if match.group("star"):
-            return "[^/]*"
-        if match.group("question"):
-            return "[^/]"
-        if bracket := match.group("bracket"):
-            inner = bracket[1:-1]
-            if inner.startswith("!"):
-                return f"[^{inner[1:]}]"
-            return bracket
-        if escape := match.group("escape"):
-            return re.escape(escape[1:])
-        if meta := match.group("meta"):
-            return "\\" + meta
-        return match.group(0)
+        """Translate a single glob token by dispatching to its registered strategy."""
+        group_name = match.lastgroup
+        token = match.group(0)
+        if group_name is not None and (translator := self.translators.get(group_name)) is not None:
+            return translator(token)
+        return token

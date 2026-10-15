@@ -1,6 +1,6 @@
-"""Compile-time rule squeezing via progressive inheritance over RuleInterpreter."""
+"""Compile-time rule squeezing via Strategy and progressive inheritance over RuleInterpreter."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 
 from zipdir.interpreter import (
@@ -9,121 +9,91 @@ from zipdir.interpreter import (
 from zipdir.interpreter import (
     redelete_matches_rescue,
 )
-from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
+from zipdir.models import (
+    IGlobCompiler,
+    IgnoreRule,
+    IRuleSqueezer,
+    ParsedRule,
+    RuleKind,
+    ScopedRule,
+)
 
 
-class RuleInterpreter(BaseRuleInterpreter):
-    """Extends base RuleInterpreter with target-aware compile-time phagocytosis (rule squeezing)."""
+class DSqueezeBuffer[T]:
+    """Mutable buffer state invariant for compile-time rule squeezing."""
 
-    def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
-        """Squeeze rule lines by pattern and scope with target-aware phagocytosis.
+    items: list[T]
+    parsed_meta: list[ParsedRule]
+    seen: dict[tuple[PurePosixPath, str], list[int]]
 
-        EXCLUDE and RESCUE rules eat any earlier rule with the same (scope, pattern).
-        REDELETE ('!{to}!pattern' or '!!pattern') eats an earlier RESCUE rule only if its
-        target matches; otherwise both rules are preserved.
-        """
-        squeezed: list[str | ScopedRule] = []
-        parsed_meta: list[ParsedRule] = []
-        seen: dict[tuple[PurePosixPath, str], list[int]] = {}
+    def __init__(self) -> None:
+        self.items = []
+        self.parsed_meta = []
+        self.seen = {}
 
-        for item in rules:
-            scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
-            line = item.rule if isinstance(item, ScopedRule) else item
-            parsed = self.parse_components(line)
-            if parsed is None:
-                continue
-            key = (scope, parsed.pattern)
-            indices = seen.get(key)
+    def shift_indices(self, removed_idx: int) -> None:
+        """Adjust recorded index positions after an element removal."""
+        for key, idx_list in self.seen.items():
+            self.seen[key] = [i - 1 if i > removed_idx else i for i in idx_list if i != removed_idx]
 
-            if not indices:
-                seen[key] = [len(squeezed)]
-                squeezed.append(item)
-                parsed_meta.append(parsed)
-                continue
 
-            if parsed.kind == RuleKind.REDELETE:
-                matched_idx = self._find_matching_rescue_index(parsed.target, indices, parsed_meta)
-                if matched_idx is not None:
-                    squeezed[matched_idx] = item
-                    parsed_meta[matched_idx] = parsed
-                else:
-                    indices.append(len(squeezed))
-                    squeezed.append(item)
-                    parsed_meta.append(parsed)
-            else:
-                primary_idx = indices[0]
-                squeezed[primary_idx] = item
-                parsed_meta[primary_idx] = parsed
-                if len(indices) > 1:
-                    for drop_idx in sorted(indices[1:], reverse=True):
-                        del squeezed[drop_idx]
-                        del parsed_meta[drop_idx]
-                        self._shift_indices(seen, drop_idx)
-                    seen[key] = [seen[key][0]]
+class ISqueezeStrategy:
+    """Nominal Strategy interface for resolving rule collisions on identical (scope, pattern)."""
 
-        return squeezed
+    def apply[T](
+        self,
+        buffer: DSqueezeBuffer[T],
+        key: tuple[PurePosixPath, str],
+        indices: list[int],
+        parsed: ParsedRule,
+        entry: T,
+    ) -> None:
+        raise NotImplementedError
 
-    def compile_all(
-        self, rules: Sequence[str | ScopedRule | IgnoreRule], *, squeeze: bool = False
-    ) -> tuple[IgnoreRule, ...]:
-        """Compile a sequence of raw or scoped rules into IgnoreRule objects.
 
-        When `squeeze=True`, performs target-aware compile-time phagocytosis by (scope, pattern).
-        """
-        if not squeeze:
-            return super().compile_all(rules)
+class OverwriteSqueezeStrategy(ISqueezeStrategy):
+    """Strategy for EXCLUDE and RESCUE: engulfs all prior rules sharing (scope, pattern)."""
 
-        staged: list[tuple[str, ParsedRule, PurePosixPath] | IgnoreRule] = []
-        parsed_meta: list[ParsedRule] = []
-        seen: dict[tuple[PurePosixPath, str], list[int]] = {}
+    def apply[T](
+        self,
+        buffer: DSqueezeBuffer[T],
+        key: tuple[PurePosixPath, str],
+        indices: list[int],
+        parsed: ParsedRule,
+        entry: T,
+    ) -> None:
+        primary_idx = indices[0]
+        buffer.items[primary_idx] = entry
+        buffer.parsed_meta[primary_idx] = parsed
+        if len(indices) > 1:
+            for drop_idx in sorted(indices[1:], reverse=True):
+                del buffer.items[drop_idx]
+                del buffer.parsed_meta[drop_idx]
+                buffer.shift_indices(drop_idx)
+            buffer.seen[key] = [buffer.seen[key][0]]
 
-        for item in rules:
-            if isinstance(item, IgnoreRule):
-                key = (item.scope, item.pattern)
-                entry: tuple[str, ParsedRule, PurePosixPath] | IgnoreRule = item
-                parsed = ParsedRule(item.kind, item.target, item.pattern)
-            else:
-                scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
-                line = item.rule if isinstance(item, ScopedRule) else item
-                parsed_opt = self.parse_components(line)
-                if parsed_opt is None or not parsed_opt.pattern:
-                    continue
-                parsed = parsed_opt
-                key = (scope, parsed.pattern)
-                entry = (line, parsed, scope)
 
-            indices = seen.get(key)
-            if not indices:
-                seen[key] = [len(staged)]
-                staged.append(entry)
-                parsed_meta.append(parsed)
-                continue
+class TargetedRedeleteSqueezeStrategy(ISqueezeStrategy):
+    """Strategy for REDELETE: replaces matching-target RESCUE/REDELETE or appends independently."""
 
-            if parsed.kind == RuleKind.REDELETE:
-                matched_idx = self._find_matching_rescue_index(parsed.target, indices, parsed_meta)
-                if matched_idx is not None:
-                    staged[matched_idx] = entry
-                    parsed_meta[matched_idx] = parsed
-                else:
-                    indices.append(len(staged))
-                    staged.append(entry)
-                    parsed_meta.append(parsed)
-            else:
-                primary_idx = indices[0]
-                staged[primary_idx] = entry
-                parsed_meta[primary_idx] = parsed
-                if len(indices) > 1:
-                    for drop_idx in sorted(indices[1:], reverse=True):
-                        del staged[drop_idx]
-                        del parsed_meta[drop_idx]
-                        self._shift_indices(seen, drop_idx)
-                    seen[key] = [seen[key][0]]
+    def apply[T](
+        self,
+        buffer: DSqueezeBuffer[T],
+        key: tuple[PurePosixPath, str],
+        indices: list[int],
+        parsed: ParsedRule,
+        entry: T,
+    ) -> None:
+        matched_idx = self._find_matching_index(parsed.target, indices, buffer.parsed_meta)
+        if matched_idx is not None:
+            buffer.items[matched_idx] = entry
+            buffer.parsed_meta[matched_idx] = parsed
+        else:
+            indices.append(len(buffer.items))
+            buffer.items.append(entry)
+            buffer.parsed_meta.append(parsed)
 
-        return tuple(
-            entry if isinstance(entry, IgnoreRule) else self._build_rule(*entry) for entry in staged
-        )
-
-    def _find_matching_rescue_index(
+    def _find_matching_index(
         self,
         redelete_target: str,
         indices: list[int],
@@ -137,11 +107,84 @@ class RuleInterpreter(BaseRuleInterpreter):
                 return idx
         return None
 
-    def _shift_indices(
-        self, seen: dict[tuple[PurePosixPath, str], list[int]], removed_idx: int
+
+DEFAULT_SQUEEZE_STRATEGIES: dict[RuleKind, ISqueezeStrategy] = {
+    RuleKind.EXCLUDE: OverwriteSqueezeStrategy(),
+    RuleKind.RESCUE: OverwriteSqueezeStrategy(),
+    RuleKind.REDELETE: TargetedRedeleteSqueezeStrategy(),
+}
+
+
+class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
+    """Extends base RuleInterpreter with target-aware compile-time phagocytosis (rule squeezing)."""
+
+    squeeze_strategies: Mapping[RuleKind, ISqueezeStrategy]
+
+    def __init__(
+        self,
+        glob_compiler: IGlobCompiler | None = None,
+        squeeze_strategies: Mapping[RuleKind, ISqueezeStrategy] | None = None,
     ) -> None:
-        for key, idx_list in seen.items():
-            seen[key] = [i - 1 if i > removed_idx else i for i in idx_list if i != removed_idx]
+        super().__init__(glob_compiler=glob_compiler)
+        self.squeeze_strategies = (
+            squeeze_strategies if squeeze_strategies is not None else DEFAULT_SQUEEZE_STRATEGIES
+        )
+
+    def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
+        """Squeeze rule lines by pattern and scope with target-aware phagocytosis."""
+        normalized: list[tuple[PurePosixPath, ParsedRule, str | ScopedRule]] = []
+        for item in rules:
+            scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
+            line = item.rule if isinstance(item, ScopedRule) else item
+            parsed = self.parse_components(line)
+            if parsed is not None:
+                normalized.append((scope, parsed, item))
+        return self._squeeze_staged(normalized)
+
+    def compile_all(
+        self, rules: Sequence[str | ScopedRule | IgnoreRule], *, squeeze: bool = False
+    ) -> tuple[IgnoreRule, ...]:
+        """Compile a sequence of raw or scoped rules into IgnoreRule objects.
+
+        When `squeeze=True`, performs target-aware compile-time phagocytosis by (scope, pattern).
+        """
+        if not squeeze:
+            return super().compile_all(rules)
+
+        type StagedEntry = tuple[str, ParsedRule, PurePosixPath] | IgnoreRule
+        normalized: list[tuple[PurePosixPath, ParsedRule, StagedEntry]] = []
+        for item in rules:
+            if isinstance(item, IgnoreRule):
+                parsed = ParsedRule(item.kind, item.target, item.pattern)
+                normalized.append((item.scope, parsed, item))
+            else:
+                scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
+                line = item.rule if isinstance(item, ScopedRule) else item
+                parsed_opt = self.parse_components(line)
+                if parsed_opt is not None:
+                    normalized.append((scope, parsed_opt, (line, parsed_opt, scope)))
+
+        staged = self._squeeze_staged(normalized)
+        return tuple(
+            entry if isinstance(entry, IgnoreRule) else self._build_rule(*entry) for entry in staged
+        )
+
+    def _squeeze_staged[T](
+        self, entries: Sequence[tuple[PurePosixPath, ParsedRule, T]]
+    ) -> list[T]:
+        """Template skeleton that squeezes normalized rule entries using RuleKind strategies."""
+        buffer: DSqueezeBuffer[T] = DSqueezeBuffer()
+        for scope, parsed, payload in entries:
+            key = (scope, parsed.pattern)
+            indices = buffer.seen.get(key)
+            if not indices:
+                buffer.seen[key] = [len(buffer.items)]
+                buffer.items.append(payload)
+                buffer.parsed_meta.append(parsed)
+                continue
+            strategy = self.squeeze_strategies[parsed.kind]
+            strategy.apply(buffer, key, indices, parsed, payload)
+        return buffer.items
 
 
 def squeeze_rules(rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
@@ -149,4 +192,12 @@ def squeeze_rules(rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
     return RuleInterpreter().squeeze(rules)
 
 
-__all__ = ["RuleInterpreter", "squeeze_rules"]
+__all__ = [
+    "DEFAULT_SQUEEZE_STRATEGIES",
+    "DSqueezeBuffer",
+    "ISqueezeStrategy",
+    "OverwriteSqueezeStrategy",
+    "RuleInterpreter",
+    "TargetedRedeleteSqueezeStrategy",
+    "squeeze_rules",
+]

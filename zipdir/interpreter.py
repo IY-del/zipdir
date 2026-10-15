@@ -5,7 +5,14 @@ from collections.abc import Sequence
 from pathlib import PurePosixPath
 
 from zipdir.glob import GlobExpression
-from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
+from zipdir.models import (
+    IGlobCompiler,
+    IgnoreRule,
+    IRuleInterpreter,
+    ParsedRule,
+    RuleKind,
+    ScopedRule,
+)
 
 # 4 components of rule syntax: [b1]{to}![pattern]
 # 1. b1: leading '!' (redelete flag)
@@ -14,18 +21,21 @@ from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
 # 4. pattern: glob pattern ({pattern})
 RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$")
 
+CANONICAL_TARGETS: dict[str, str] = {
+    "": "",
+    ".": "./",
+    "./": "./",
+    "..": "../",
+    "../": "../",
+    "/": "/",
+}
+
 
 def normalize_target(target: str) -> str:
     """Normalize a rescue/redelete destination target into canonical form."""
     stripped = target.strip()
-    if stripped == "":
-        return ""
-    if stripped in (".", "./"):
-        return "./"
-    if stripped in ("..", "../"):
-        return "../"
-    if stripped == "/":
-        return "/"
+    if stripped in CANONICAL_TARGETS:
+        return CANONICAL_TARGETS[stripped]
     return stripped.rstrip("/")
 
 
@@ -36,12 +46,12 @@ def redelete_matches_rescue(redelete_target: str, rescued_target: str | None) ->
     return normalize_target(redelete_target) == normalize_target(rescued_target)
 
 
-class RuleInterpreter:
+class RuleInterpreter(IRuleInterpreter):
     """Base interpreter that parses 4-component syntax and compiles .zipignore rules."""
 
-    glob_compiler: GlobExpression
+    glob_compiler: IGlobCompiler
 
-    def __init__(self, glob_compiler: GlobExpression | None = None) -> None:
+    def __init__(self, glob_compiler: IGlobCompiler | None = None) -> None:
         self.glob_compiler = glob_compiler or GlobExpression()
 
     def parse_components(self, line: str) -> ParsedRule | None:
@@ -79,7 +89,7 @@ class RuleInterpreter:
     def interpret(self, line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
         """Parse and compile a raw rule line into an IgnoreRule."""
         parsed = self.parse_components(line)
-        if parsed is None or not parsed.pattern:
+        if parsed is None:
             return None
         return self._build_rule(line, parsed, scope)
 
