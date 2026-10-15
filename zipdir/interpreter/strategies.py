@@ -3,8 +3,9 @@
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from zipdir.interpreter.interface import DSqueezeBuffer, ISqueezeStrategy
-from zipdir.models import DParsedRule, RuleKind, redelete_matches_rescue
+from zipdir.interfaces.interpreter import DSqueezeBuffer, ISqueezeStrategy
+from zipdir.interfaces.models import DParsedRule, RuleKind
+from zipdir.models import redelete_matches_rescue
 
 
 class SqueezeBuffer[T](DSqueezeBuffer[T]):

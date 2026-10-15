@@ -1,7 +1,8 @@
-"""zipdir package: Composition Root assembling interfaces (D*/I*/M*) and concrete implementations."""
+"""zipdir package: Composition Root assembling interfaces/ and progressive-inheritance subpackages."""
 
 from zipdir.evaluator import (
     ArchiveRootRemapStrategy,
+    EvaluationState,
     ExcludeTransition,
     ExileRemapStrategy,
     LocalScopeRemapStrategy,
@@ -9,6 +10,7 @@ from zipdir.evaluator import (
     PathEvaluator,
     PreserveHierarchyRemapStrategy,
     RedeleteTransition,
+    RemapContext,
     RescueTransition,
     evaluate_path,
 )
@@ -56,18 +58,22 @@ from zipdir.interfaces import (
     MRuleSqueezer,
     RuleKind,
 )
-from zipdir.interpreter import compile_rule
+from zipdir.interpreter import (
+    OverwriteSqueezeStrategy,
+    RuleInterpreter,
+    SqueezeBuffer,
+    TargetedRedeleteSqueezeStrategy,
+    compile_rule,
+    squeeze_rules,
+)
 from zipdir.models import (
     EvaluationResult,
-    EvaluationState,
     IgnoreRule,
     PackagerConfig,
     ParsedRule,
     PresetModel,
-    RemapContext,
     ResolvedOutput,
     ScopedRule,
-    SqueezeBuffer,
     normalize_posix_path,
     normalize_target,
     redelete_matches_rescue,
@@ -92,12 +98,6 @@ from zipdir.presets import (
     discover_sub_zipignores,
     load_presets,
     load_raw_zipignore_preset,
-)
-from zipdir.squeezer import (
-    OverwriteSqueezeStrategy,
-    RuleInterpreter,
-    TargetedRedeleteSqueezeStrategy,
-    squeeze_rules,
 )
 from zipdir.ui import ConsoleReporter, format_size
 from zipdir.cli import ZipdirCommand, app, package  # isort: skip

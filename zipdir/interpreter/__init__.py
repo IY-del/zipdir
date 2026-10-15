@@ -1,19 +1,10 @@
-"""Interpreter package exporting the final squeezed RuleInterpreter and its interfaces."""
+"""Interpreter package exporting the final squeezed RuleInterpreter and strategies."""
 
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
+from zipdir.interfaces.models import DScopedRule
 from zipdir.interpreter.base import RULE_COMPONENT_PATTERN
-from zipdir.interpreter.interface import (
-    DRuleInterpreter,
-    DRuleSqueezer,
-    DSqueezeBuffer,
-    IRuleInterpreter,
-    IRuleSqueezer,
-    ISqueezeStrategy,
-    MRuleInterpreter,
-    MRuleSqueezer,
-)
 from zipdir.interpreter.squeezed import RuleInterpreter
 from zipdir.interpreter.strategies import (
     DEFAULT_SQUEEZE_STRATEGIES,
@@ -21,7 +12,7 @@ from zipdir.interpreter.strategies import (
     SqueezeBuffer,
     TargetedRedeleteSqueezeStrategy,
 )
-from zipdir.models import DScopedRule, IgnoreRule, ScopedRule
+from zipdir.models import IgnoreRule, ScopedRule
 
 
 def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
@@ -36,14 +27,6 @@ def squeeze_rules(rules: Sequence[str | DScopedRule]) -> list[str | ScopedRule]:
 
 __all__ = [
     "DEFAULT_SQUEEZE_STRATEGIES",
-    "DRuleInterpreter",
-    "DRuleSqueezer",
-    "DSqueezeBuffer",
-    "IRuleInterpreter",
-    "IRuleSqueezer",
-    "ISqueezeStrategy",
-    "MRuleInterpreter",
-    "MRuleSqueezer",
     "OverwriteSqueezeStrategy",
     "RULE_COMPONENT_PATTERN",
     "RuleInterpreter",

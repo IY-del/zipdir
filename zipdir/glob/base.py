@@ -3,7 +3,7 @@
 import re
 from collections.abc import Callable, Mapping
 
-from zipdir.glob.interface import IGlobCompiler
+from zipdir.interfaces.glob import IGlobCompiler
 
 GLOB_TOKEN_REGEX = re.compile(
     r"""

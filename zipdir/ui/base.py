@@ -1,11 +1,12 @@
-"""Concrete terminal styling, size formatting, and console reporting implementing IReporter."""
+"""Minimal concrete console reporter and terminal styling helpers (base stage for progressive inheritance)."""
 
 import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from zipdir.interfaces import DPackagerConfig, DPreset, IReporter
+from zipdir.interfaces.models import DPackagerConfig, DPreset
+from zipdir.interfaces.ui import IReporter
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -45,7 +46,7 @@ def format_size(num_bytes: int | float) -> str:
 
 
 class ConsoleReporter(IReporter):
-    """Concrete reporter rendering summaries, dry-run previews, and preset listings to terminal."""
+    """Minimal concrete reporter rendering preset listings, dry-run previews, and base summaries."""
 
     use_color: bool
 
@@ -111,16 +112,6 @@ class ConsoleReporter(IReporter):
         print(f"  {self._dim('Path:')}     {self._cyan(str(output))}")
         print(f"  {self._dim('Preset:')}   {config.preset_name} ({len(config.rules)} rules)")
         print(f"  {self._dim('Members:')}  {file_count} files, {dir_count} directories")
-
-        if config.verbose:
-            if rescued_files:
-                print(f"\n{self._cyan('Rescued / Remapped files (!):')}")
-                for src, dst in rescued_files:
-                    print(f"  ↑ {src} -> {dst}")
-            if excluded_files:
-                print(f"{self._yellow('Excluded paths:')}")
-                for ex in excluded_files:
-                    print(f"  ✕ {ex}")
 
     def _success(self, text: str) -> str:
         return _c(text, "1;32", enabled=self.use_color)

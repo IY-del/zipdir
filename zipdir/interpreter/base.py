@@ -4,22 +4,11 @@ import re
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from zipdir.glob.interface import IGlobCompiler, MGlobCompiler
-from zipdir.interpreter.interface import IRuleInterpreter
-from zipdir.models import (
-    DIgnoreRule,
-    DParsedRule,
-    DScopedRule,
-    IgnoreRule,
-    ParsedRule,
-    RuleKind,
-)
+from zipdir.interfaces.glob import IGlobCompiler, MGlobCompiler
+from zipdir.interfaces.interpreter import IRuleInterpreter
+from zipdir.interfaces.models import DIgnoreRule, DParsedRule, DScopedRule, RuleKind
+from zipdir.models import IgnoreRule, ParsedRule
 
-# 4 components of rule syntax: [b1]{to}![pattern]
-# 1. b1: leading '!' (redelete flag)
-# 2. to: destination string ({to})
-# 3. '!': separator
-# 4. pattern: glob pattern ({pattern})
 RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$")
 
 
@@ -69,27 +58,28 @@ class RuleInterpreter(IRuleInterpreter):
         """Compile a sequence of raw or scoped rules into IgnoreRule objects."""
         compiled: list[IgnoreRule] = []
         for item in rules:
-            if isinstance(item, IgnoreRule):
-                compiled.append(item)
-            elif isinstance(item, DIgnoreRule):
-                compiled.append(
-                    IgnoreRule(
-                        raw=item.raw,
-                        kind=item.kind,
-                        target=item.target,
-                        pattern=item.pattern,
-                        regex=item.regex,
-                        is_dir_only=item.is_dir_only,
-                        has_slash=item.has_slash,
-                        scope=item.scope,
-                    )
-                )
-            elif isinstance(item, DScopedRule):
-                if (r := self.interpret(item.rule, scope=item.scope)) is not None:
-                    compiled.append(r)
-            elif (r := self.interpret(item)) is not None:
-                compiled.append(r)
+            rule = self._compile_single_item(item)
+            if rule is not None:
+                compiled.append(rule)
         return tuple(compiled)
+
+    def _compile_single_item(self, item: str | DScopedRule | DIgnoreRule) -> IgnoreRule | None:
+        if isinstance(item, IgnoreRule):
+            return item
+        if isinstance(item, DIgnoreRule):
+            return IgnoreRule(
+                raw=item.raw,
+                kind=item.kind,
+                target=item.target,
+                pattern=item.pattern,
+                regex=item.regex,
+                is_dir_only=item.is_dir_only,
+                has_slash=item.has_slash,
+                scope=item.scope,
+            )
+        if isinstance(item, DScopedRule):
+            return self.interpret(item.rule, scope=item.scope)
+        return self.interpret(item)
 
     def _build_rule(self, raw: str, parsed: DParsedRule, scope: PurePosixPath) -> IgnoreRule:
         regex, is_dir_only, has_slash = self.glob_compiler.interpret(parsed.pattern)

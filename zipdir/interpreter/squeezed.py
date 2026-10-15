@@ -3,19 +3,14 @@
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 
-from zipdir.glob.interface import IGlobCompiler, MGlobCompiler
+from zipdir.interfaces.glob import IGlobCompiler, MGlobCompiler
+from zipdir.interfaces.interpreter import IRuleSqueezer, ISqueezeStrategy
+from zipdir.interfaces.models import DIgnoreRule, DParsedRule, DScopedRule, RuleKind
 from zipdir.interpreter.base import RuleInterpreter as BaseRuleInterpreter
-from zipdir.interpreter.interface import IRuleSqueezer, ISqueezeStrategy
 from zipdir.interpreter.strategies import DEFAULT_SQUEEZE_STRATEGIES, SqueezeBuffer
-from zipdir.models import (
-    DIgnoreRule,
-    DParsedRule,
-    DScopedRule,
-    IgnoreRule,
-    ParsedRule,
-    RuleKind,
-    ScopedRule,
-)
+from zipdir.models import IgnoreRule, ParsedRule, ScopedRule
+
+type _StagedCompileEntry = tuple[str, DParsedRule, PurePosixPath] | IgnoreRule
 
 
 class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
@@ -36,18 +31,11 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
 
     def squeeze(self, rules: Sequence[str | DScopedRule]) -> list[str | ScopedRule]:
         """Squeeze rule lines by pattern and scope with target-aware phagocytosis."""
-        normalized: list[tuple[PurePosixPath, DParsedRule, str | ScopedRule]] = []
-        for item in rules:
-            scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
-            line = item.rule if isinstance(item, DScopedRule) else item
-            out_item: str | ScopedRule = (
-                item
-                if isinstance(item, (str, ScopedRule))
-                else ScopedRule(scope=item.scope, rule=item.rule)
-            )
-            parsed = self.parse_components(line)
-            if parsed is not None:
-                normalized.append((scope, parsed, out_item))
+        normalized = [
+            entry
+            for item in rules
+            if (entry := self._normalize_squeeze_item(item)) is not None
+        ]
         return self._squeeze_staged(normalized)
 
     def compile_all(
@@ -57,14 +45,39 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
         if not squeeze:
             return super().compile_all(rules)
 
-        type StagedEntry = tuple[str, DParsedRule, PurePosixPath] | IgnoreRule
-        normalized: list[tuple[PurePosixPath, DParsedRule, StagedEntry]] = []
-        for item in rules:
-            if isinstance(item, IgnoreRule):
-                parsed = ParsedRule(item.kind, item.target, item.pattern)
-                normalized.append((item.scope, parsed, item))
-            elif isinstance(item, DIgnoreRule):
-                concrete_rule = IgnoreRule(
+        normalized = [
+            entry
+            for item in rules
+            if (entry := self._normalize_compile_item(item)) is not None
+        ]
+        staged = self._squeeze_staged(normalized)
+        return tuple(
+            entry if isinstance(entry, IgnoreRule) else self._build_rule(*entry) for entry in staged
+        )
+
+    def _normalize_squeeze_item(
+        self, item: str | DScopedRule
+    ) -> tuple[PurePosixPath, DParsedRule, str | ScopedRule] | None:
+        scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
+        line = item.rule if isinstance(item, DScopedRule) else item
+        parsed = self.parse_components(line)
+        if parsed is None:
+            return None
+        out_item: str | ScopedRule = (
+            item
+            if isinstance(item, (str, ScopedRule))
+            else ScopedRule(scope=item.scope, rule=item.rule)
+        )
+        return scope, parsed, out_item
+
+    def _normalize_compile_item(
+        self, item: str | DScopedRule | DIgnoreRule
+    ) -> tuple[PurePosixPath, DParsedRule, _StagedCompileEntry] | None:
+        if isinstance(item, DIgnoreRule):
+            concrete = (
+                item
+                if isinstance(item, IgnoreRule)
+                else IgnoreRule(
                     raw=item.raw,
                     kind=item.kind,
                     target=item.target,
@@ -74,19 +87,15 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
                     has_slash=item.has_slash,
                     scope=item.scope,
                 )
-                parsed = ParsedRule(item.kind, item.target, item.pattern)
-                normalized.append((item.scope, parsed, concrete_rule))
-            else:
-                scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
-                line = item.rule if isinstance(item, DScopedRule) else item
-                parsed_opt = self.parse_components(line)
-                if parsed_opt is not None:
-                    normalized.append((scope, parsed_opt, (line, parsed_opt, scope)))
+            )
+            return concrete.scope, ParsedRule(concrete.kind, concrete.target, concrete.pattern), concrete
 
-        staged = self._squeeze_staged(normalized)
-        return tuple(
-            entry if isinstance(entry, IgnoreRule) else self._build_rule(*entry) for entry in staged
-        )
+        scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
+        line = item.rule if isinstance(item, DScopedRule) else item
+        parsed = self.parse_components(line)
+        if parsed is None:
+            return None
+        return scope, parsed, (line, parsed, scope)
 
     def _squeeze_staged[T](
         self, entries: Sequence[tuple[PurePosixPath, DParsedRule, T]]
@@ -101,6 +110,5 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
                 buffer.items.append(payload)
                 buffer.parsed_meta.append(parsed)
                 continue
-            strategy = self.squeeze_strategies[parsed.kind]
-            strategy.apply(buffer, key, indices, parsed, payload)
+            self.squeeze_strategies[parsed.kind].apply(buffer, key, indices, parsed, payload)
         return buffer.items

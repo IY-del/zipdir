@@ -8,17 +8,11 @@ from typing import Annotated
 import typer
 from typer.core import TyperCommand
 
-from zipdir.interfaces import (
-    DPreset,
-    IOutputResolver,
-    IPackager,
-    IPresetCatalog,
-    IReporter,
-    MOutputResolver,
-    MPackager,
-    MPresetCatalog,
-    MReporter,
-)
+from zipdir.interfaces.models import DPreset
+from zipdir.interfaces.output import IOutputResolver, MOutputResolver
+from zipdir.interfaces.packager import IPackager, MPackager
+from zipdir.interfaces.presets import IPresetCatalog, MPresetCatalog
+from zipdir.interfaces.ui import IReporter, MReporter
 from zipdir.models import PackagerConfig
 from zipdir.output import resolve_output_path
 from zipdir.ui import color_yellow
@@ -174,37 +168,9 @@ def package(
         reporter.print_presets(presets)
         return
 
-    target_dir_str: str
-    target_out_arg: str | None = output
-
-    if directory is None:
-        target_dir_str = "."
-    elif output_path is None and directory.endswith(".zip"):
-        target_dir_str = "."
-        if target_out_arg is None:
-            target_out_arg = directory
-    else:
-        target_dir_str = directory
-        if target_out_arg is None:
-            target_out_arg = output_path
-
-    source = Path(target_dir_str).expanduser().resolve()
-    if not source.is_dir():
-        print(f"{color_yellow('Error:')} Not a directory: {source}", file=sys.stderr)
-        raise typer.Exit(code=1)
-
-    archive_name = name if name is not None else source.name
-    if (
-        not archive_name
-        or archive_name in (".", "..")
-        or "/" in archive_name
-        or "\\" in archive_name
-    ):
-        print(
-            f"{color_yellow('Error:')} --name must be a nonempty single directory name",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=1)
+    target_dir_str, target_out_arg = _resolve_cli_targets(directory, output_path, output)
+    source = _validate_source_dir(target_dir_str)
+    archive_name = _validate_archive_name(name, source)
 
     try:
         effective_preset_name, combined_rules = catalog.resolve_cascade(
@@ -245,3 +211,37 @@ def package(
     except (FileExistsError, FileNotFoundError, ValueError) as e:
         print(f"{color_yellow('Error:')} {e}", file=sys.stderr)
         raise typer.Exit(code=1)
+
+
+def _resolve_cli_targets(
+    directory: str | None, output_path: str | None, output: str | None
+) -> tuple[str, str | None]:
+    if directory is None:
+        return ".", output
+    if output_path is None and directory.endswith(".zip"):
+        return ".", output if output is not None else directory
+    return directory, output if output is not None else output_path
+
+
+def _validate_source_dir(target_dir_str: str) -> Path:
+    source = Path(target_dir_str).expanduser().resolve()
+    if not source.is_dir():
+        print(f"{color_yellow('Error:')} Not a directory: {source}", file=sys.stderr)
+        raise typer.Exit(code=1)
+    return source
+
+
+def _validate_archive_name(name: str | None, source: Path) -> str:
+    archive_name = name if name is not None else source.name
+    if (
+        not archive_name
+        or archive_name in (".", "..")
+        or "/" in archive_name
+        or "\\" in archive_name
+    ):
+        print(
+            f"{color_yellow('Error:')} --name must be a nonempty single directory name",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+    return archive_name
