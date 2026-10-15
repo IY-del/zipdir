@@ -7,17 +7,14 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from zipdir.interfaces import (
+from zipdir.models.interface import (
     DEvaluationResult,
-    DEvaluationState,
     DIgnoreRule,
     DPackagerConfig,
     DParsedRule,
     DPreset,
-    DRemapContext,
     DResolvedOutput,
     DScopedRule,
-    DSqueezeBuffer,
     RuleKind,
 )
 
@@ -169,42 +166,3 @@ class PackagerConfig(BaseModel, DPackagerConfig):
     dry_run: bool = False
     force: bool = False
     verbose: bool = False
-
-
-class SqueezeBuffer[T](DSqueezeBuffer[T]):
-    """Concrete mutable buffer state for compile-time rule squeezing."""
-
-    items: list[T]
-    parsed_meta: list[DParsedRule]
-    seen: dict[tuple[PurePosixPath, str], list[int]]
-
-    def __init__(self) -> None:
-        self.items = []
-        self.parsed_meta = []
-        self.seen = {}
-
-    def shift_indices(self, removed_idx: int) -> None:
-        """Adjust recorded index positions after an element removal."""
-        for key, idx_list in self.seen.items():
-            self.seen[key] = [i - 1 if i > removed_idx else i for i in idx_list if i != removed_idx]
-
-
-@dataclass
-class EvaluationState(DEvaluationState):
-    """Concrete mutable state tracking exclusion, rescue, and shallowest excluded ancestor."""
-
-    is_excluded: bool = False
-    shallowest_excluded_ancestor: PurePosixPath | None = None
-    excluded_by: IgnoreRule | None = None
-    rescued_by: IgnoreRule | None = None
-
-
-@dataclass(frozen=True)
-class RemapContext(DRemapContext):
-    """Concrete coordinate parameters passed to IRemapStrategy implementations."""
-
-    rel_path: PurePosixPath
-    rescued_by: IgnoreRule
-    shallowest_excluded_ancestor: PurePosixPath | None
-    sub_path: PurePosixPath
-    anchor_parent: PurePosixPath

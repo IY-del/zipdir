@@ -1,95 +1,25 @@
-"""Concrete compile-time rule squeezing via Strategy and progressive inheritance."""
+"""Squeezed rule interpreter via progressive inheritance over base.RuleInterpreter."""
 
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 
-from zipdir.interfaces import (
+from zipdir.glob.interface import IGlobCompiler, MGlobCompiler
+from zipdir.interpreter.base import RuleInterpreter as BaseRuleInterpreter
+from zipdir.interpreter.interface import IRuleSqueezer, ISqueezeStrategy
+from zipdir.interpreter.strategies import DEFAULT_SQUEEZE_STRATEGIES, SqueezeBuffer
+from zipdir.models import (
     DIgnoreRule,
     DParsedRule,
     DScopedRule,
-    DSqueezeBuffer,
-    IGlobCompiler,
-    IRuleSqueezer,
-    ISqueezeStrategy,
-    MGlobCompiler,
-    RuleKind,
-)
-from zipdir.interpreter import RuleInterpreter as BaseRuleInterpreter
-from zipdir.models import (
     IgnoreRule,
     ParsedRule,
+    RuleKind,
     ScopedRule,
-    SqueezeBuffer,
-    redelete_matches_rescue,
 )
-
-
-class OverwriteSqueezeStrategy(ISqueezeStrategy):
-    """Concrete Strategy for EXCLUDE and RESCUE: engulfs all prior rules sharing (scope, pattern)."""
-
-    def apply[T](
-        self,
-        buffer: DSqueezeBuffer[T],
-        key: tuple[PurePosixPath, str],
-        indices: list[int],
-        parsed: DParsedRule,
-        entry: T,
-    ) -> None:
-        primary_idx = indices[0]
-        buffer.items[primary_idx] = entry
-        buffer.parsed_meta[primary_idx] = parsed
-        if len(indices) > 1:
-            for drop_idx in sorted(indices[1:], reverse=True):
-                del buffer.items[drop_idx]
-                del buffer.parsed_meta[drop_idx]
-                buffer.shift_indices(drop_idx)
-            buffer.seen[key] = [buffer.seen[key][0]]
-
-
-class TargetedRedeleteSqueezeStrategy(ISqueezeStrategy):
-    """Concrete Strategy for REDELETE: replaces matching-target RESCUE/REDELETE or appends."""
-
-    def apply[T](
-        self,
-        buffer: DSqueezeBuffer[T],
-        key: tuple[PurePosixPath, str],
-        indices: list[int],
-        parsed: DParsedRule,
-        entry: T,
-    ) -> None:
-        matched_idx = self._find_matching_index(parsed.target, indices, buffer.parsed_meta)
-        if matched_idx is not None:
-            buffer.items[matched_idx] = entry
-            buffer.parsed_meta[matched_idx] = parsed
-        else:
-            indices.append(len(buffer.items))
-            buffer.items.append(entry)
-            buffer.parsed_meta.append(parsed)
-
-    def _find_matching_index(
-        self,
-        redelete_target: str,
-        indices: list[int],
-        parsed_meta: Sequence[DParsedRule],
-    ) -> int | None:
-        for idx in reversed(indices):
-            candidate = parsed_meta[idx]
-            if candidate.kind in (RuleKind.RESCUE, RuleKind.REDELETE) and redelete_matches_rescue(
-                redelete_target, candidate.target
-            ):
-                return idx
-        return None
-
-
-DEFAULT_SQUEEZE_STRATEGIES: dict[RuleKind, ISqueezeStrategy] = {
-    RuleKind.EXCLUDE: OverwriteSqueezeStrategy(),
-    RuleKind.RESCUE: OverwriteSqueezeStrategy(),
-    RuleKind.REDELETE: TargetedRedeleteSqueezeStrategy(),
-}
 
 
 class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
-    """Concrete squeezer extending base RuleInterpreter via progressive inheritance."""
+    """Extends base RuleInterpreter with target-aware compile-time phagocytosis (rule squeezing)."""
 
     squeeze_strategies: Mapping[RuleKind, ISqueezeStrategy]
 
@@ -174,17 +104,3 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
             strategy = self.squeeze_strategies[parsed.kind]
             strategy.apply(buffer, key, indices, parsed, payload)
         return buffer.items
-
-
-def squeeze_rules(rules: Sequence[str | DScopedRule]) -> list[str | ScopedRule]:
-    """Squeeze rule lines by pattern and scope."""
-    return RuleInterpreter().squeeze(rules)
-
-
-__all__ = [
-    "DEFAULT_SQUEEZE_STRATEGIES",
-    "OverwriteSqueezeStrategy",
-    "RuleInterpreter",
-    "TargetedRedeleteSqueezeStrategy",
-    "squeeze_rules",
-]

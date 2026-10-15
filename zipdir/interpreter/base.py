@@ -1,23 +1,18 @@
-"""Concrete 4-component pattern matching and base rule compiler implementing IRuleInterpreter."""
+"""Minimal concrete 4-component .zipignore rule interpreter (base stage for progressive inheritance)."""
 
 import re
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from zipdir.interfaces import (
+from zipdir.glob.interface import IGlobCompiler, MGlobCompiler
+from zipdir.interpreter.interface import IRuleInterpreter
+from zipdir.models import (
     DIgnoreRule,
     DParsedRule,
     DScopedRule,
-    IGlobCompiler,
-    IRuleInterpreter,
-    MGlobCompiler,
-    RuleKind,
-)
-from zipdir.models import (
     IgnoreRule,
     ParsedRule,
-    normalize_target,
-    redelete_matches_rescue,
+    RuleKind,
 )
 
 # 4 components of rule syntax: [b1]{to}![pattern]
@@ -29,7 +24,7 @@ RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$"
 
 
 class RuleInterpreter(IRuleInterpreter):
-    """Concrete base interpreter that parses 4-component syntax and compiles .zipignore rules."""
+    """Minimal concrete interpreter that parses 4-component syntax and compiles .zipignore rules."""
 
     glob_compiler: IGlobCompiler
 
@@ -108,17 +103,3 @@ class RuleInterpreter(IRuleInterpreter):
             has_slash=has_slash,
             scope=scope,
         )
-
-
-def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
-    """Compile a single .zipignore rule line into an IgnoreRule."""
-    return RuleInterpreter().interpret(line, scope=scope)
-
-
-__all__ = [
-    "RULE_COMPONENT_PATTERN",
-    "RuleInterpreter",
-    "compile_rule",
-    "normalize_target",
-    "redelete_matches_rescue",
-]
