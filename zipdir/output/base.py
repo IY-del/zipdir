@@ -42,22 +42,29 @@ class OutputResolver(IOutputResolver):
         force: bool = False,
     ) -> ResolvedOutput:
         """Resolve destination archive path and return ResolvedOutput metadata."""
-        if output_target is None:
-            return self._build_dynamic_output(
-                self.cwd.resolve(), name, timestamp=timestamp, force=force
-            )
+        match output_target:
+            case None:
+                return self._build_dynamic_output(
+                    self.cwd.resolve(), name, timestamp=timestamp, force=force
+                )
+            case Path() as p:
+                raw = str(p).strip()
+            case str() as s:
+                raw = s.strip()
 
-        raw = output_target.strip() if isinstance(output_target, str) else str(output_target)
         target_path, is_forced_dir = self._classify_target(source, raw)
 
-        if raw.endswith(".zip") and not is_forced_dir:
-            final_path = target_path.parent.resolve() / target_path.name
-            return ResolvedOutput(
-                path=final_path,
-                explicit_zip=True,
-                stem=final_path.stem,
-                fell_back=False,
-            )
+        match (raw.endswith(".zip"), is_forced_dir):
+            case (True, False):
+                final_path = target_path.parent.resolve() / target_path.name
+                return ResolvedOutput(
+                    path=final_path,
+                    explicit_zip=True,
+                    stem=final_path.stem,
+                    fell_back=False,
+                )
+            case _:
+                pass
 
         base_dir, stem = self._resolve_dir_and_stem(target_path, name, is_forced_dir=is_forced_dir)
         return self._build_dynamic_output(base_dir, stem, timestamp=timestamp, force=force)
@@ -83,9 +90,11 @@ class OutputResolver(IOutputResolver):
     def _resolve_dir_and_stem(
         self, target_path: Path, default_name: str, *, is_forced_dir: bool
     ) -> tuple[Path, str]:
-        if is_forced_dir or target_path.is_dir():
-            return target_path.resolve(), default_name
-        return target_path.parent.resolve(), target_path.name
+        match is_forced_dir or target_path.is_dir():
+            case True:
+                return target_path.resolve(), default_name
+            case False:
+                return target_path.parent.resolve(), target_path.name
 
     def _classify_target(self, source: Path, raw: str) -> tuple[Path, bool]:
         """Classify raw output string into (target_path, is_forced_dir) via Strategy chain."""
@@ -103,8 +112,12 @@ class OutputResolver(IOutputResolver):
         force: bool,
     ) -> ResolvedOutput:
         """Base dynamic output builder (extended with collision fallback in fallback.py)."""
-        if timestamp:
-            ts_path = base_dir / f"{stem}_{self.timestamp_fn()}.zip"
-            return ResolvedOutput(path=ts_path, explicit_zip=False, stem=stem, fell_back=False)
-        primary_path = base_dir / f"{stem}.zip"
-        return ResolvedOutput(path=primary_path, explicit_zip=False, stem=stem, fell_back=False)
+        match timestamp:
+            case True:
+                ts_path = base_dir / f"{stem}_{self.timestamp_fn()}.zip"
+                return ResolvedOutput(path=ts_path, explicit_zip=False, stem=stem, fell_back=False)
+            case False:
+                primary_path = base_dir / f"{stem}.zip"
+                return ResolvedOutput(
+                    path=primary_path, explicit_zip=False, stem=stem, fell_back=False
+                )

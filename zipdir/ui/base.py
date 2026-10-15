@@ -5,14 +5,18 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from zipdir.interfaces.models import DPackagerConfig, DPreset
 from zipdir.interfaces.ui import IReporter
+from zipdir.models import PackagerConfig, PresetModel
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
 def _c(text: str, code: str, *, enabled: bool = USE_COLOR) -> str:
-    return f"\033[{code}m{text}\033[0m" if enabled else text
+    match enabled:
+        case True:
+            return f"\033[{code}m{text}\033[0m"
+        case False:
+            return text
 
 
 def color_success(text: str) -> str:
@@ -40,7 +44,11 @@ def format_size(num_bytes: int | float) -> str:
     size = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024.0:
-            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+            match unit:
+                case "B":
+                    return f"{int(size)} B"
+                case _:
+                    return f"{size:.1f} {unit}"
         size /= 1024.0
     return f"{size:.1f} TB"
 
@@ -53,7 +61,7 @@ class ConsoleReporter(IReporter):
     def __init__(self, use_color: bool | None = None) -> None:
         self.use_color = USE_COLOR if use_color is None else use_color
 
-    def print_presets(self, presets: Mapping[str, DPreset]) -> None:
+    def print_presets(self, presets: Mapping[str, PresetModel]) -> None:
         """Display available presets and their configurations."""
         print(self._bold("\nAvailable zipdir presets:\n"))
         for name, p in presets.items():
@@ -69,7 +77,7 @@ class ConsoleReporter(IReporter):
 
     def print_dry_run(
         self,
-        config: DPackagerConfig,
+        config: PackagerConfig,
         entries: Sequence[tuple[Path, str]],
         rescued_files: Sequence[tuple[str, str]],
         excluded_files: Sequence[str],
@@ -95,7 +103,7 @@ class ConsoleReporter(IReporter):
 
     def print_summary(
         self,
-        config: DPackagerConfig,
+        config: PackagerConfig,
         output: Path,
         entries: Sequence[tuple[Path, str]],
         rescued_files: Sequence[tuple[str, str]],

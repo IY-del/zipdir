@@ -3,7 +3,6 @@
 from collections.abc import Mapping
 from pathlib import Path
 
-from zipdir.interfaces.models import DPreset
 from zipdir.models import PresetModel, ScopedRule
 from zipdir.presets.linearized import PresetCatalog as LinearizedPresetCatalog
 
@@ -14,14 +13,14 @@ class PresetCatalog(LinearizedPresetCatalog):
     def _collect_tier1_rules(
         self,
         source: Path,
-        loaded_presets: Mapping[str, DPreset],
+        loaded_presets: Mapping[str, PresetModel],
         preset: str | None,
         local_model: PresetModel | None,
         effective_name: str,
     ) -> tuple[list[str], str]:
-        if preset is not None:
-            preset_path = Path(preset).expanduser()
-            if preset not in loaded_presets and preset_path.is_file():
+        match (preset, local_model):
+            case (str() as p, _) if p not in loaded_presets and Path(p).expanduser().is_file():
+                preset_path = Path(p).expanduser()
                 custom_model = self.parse_file(preset_path)
                 extended = self._resolve_extended_rules(
                     custom_model.extends,
@@ -30,36 +29,42 @@ class PresetCatalog(LinearizedPresetCatalog):
                     preset_path,
                 )
                 return [*extended, *custom_model.rules], custom_model.name or preset_path.name
-        elif local_model is not None and local_model.extends:
-            extended = self._resolve_extended_rules(
-                local_model.extends,
-                source,
-                loaded_presets,
-                local_model.source_path,
-            )
-            return extended, effective_name
-        return super()._collect_tier1_rules(
-            source, loaded_presets, preset, local_model, effective_name
-        )
+            case (None, PresetModel(extends=extends, source_path=src)) if extends:
+                extended = self._resolve_extended_rules(
+                    extends,
+                    source,
+                    loaded_presets,
+                    src,
+                )
+                return extended, effective_name
+            case _:
+                return super()._collect_tier1_rules(
+                    source, loaded_presets, preset, local_model, effective_name
+                )
 
     def _collect_tier2_rules(
         self,
         source: Path,
-        loaded_presets: Mapping[str, DPreset],
+        loaded_presets: Mapping[str, PresetModel],
         preset: str | None,
         local_model: PresetModel | None,
     ) -> list[ScopedRule]:
-        if local_model is None:
-            return []
-        tier2_raw: list[str] = []
-        if preset is not None and local_model.extends:
-            tier2_raw.extend(
-                self._resolve_extended_rules(
-                    local_model.extends,
-                    source,
-                    loaded_presets,
-                    local_model.source_path,
-                )
-            )
-        tier2_raw.extend(local_model.rules)
-        return [ScopedRule(rule=r) for r in tier2_raw]
+        match local_model:
+            case None:
+                return []
+            case PresetModel(rules=local_rules, extends=local_extends, source_path=src):
+                tier2_raw: list[str] = []
+                match (preset, local_extends):
+                    case (str(), list() as ext) if ext:
+                        tier2_raw.extend(
+                            self._resolve_extended_rules(
+                                ext,
+                                source,
+                                loaded_presets,
+                                src,
+                            )
+                        )
+                    case _:
+                        pass
+                tier2_raw.extend(local_rules)
+                return [ScopedRule(rule=r) for r in tier2_raw]

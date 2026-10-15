@@ -5,8 +5,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.interfaces.interpreter import IRuleSqueezer, MRuleSqueezer
-from zipdir.interfaces.models import DPreset
+from zipdir.interfaces.interpreter import IRuleSqueezer
 from zipdir.interfaces.presets import IPresetCatalog
 from zipdir.models import PresetModel, ScopedRule
 
@@ -18,16 +17,14 @@ DEFAULT_PRESET_DIRS: list[Path] = [
 ]
 
 
-def _as_preset_model(preset: DPreset) -> PresetModel:
-    if isinstance(preset, PresetModel):
-        return preset
-    return PresetModel(
-        name=preset.name,
-        description=preset.description,
-        rules=list(preset.rules),
-        extends=list(preset.extends),
-        source_path=preset.source_path,
-    )
+def _as_preset_model(preset: PresetModel | dict[str, object]) -> PresetModel:
+    match preset:
+        case PresetModel():
+            return preset
+        case dict() as d:
+            return PresetModel(**d)
+        case _:
+            raise TypeError(f"Invalid preset type: {type(preset)}")
 
 
 class PresetCatalog(IPresetCatalog):
@@ -40,13 +37,17 @@ class PresetCatalog(IPresetCatalog):
         self,
         preset_dirs: Sequence[Path] | None = None,
         interpreter: IRuleSqueezer | None = None,
-        create_interpreter: MRuleSqueezer = IRuleSqueezer,
     ) -> None:
         dirs = list(preset_dirs) if preset_dirs is not None else list(DEFAULT_PRESET_DIRS)
         if "ZIPDIR_PRESETS_DIR" in os.environ:
             dirs.insert(0, Path(os.environ["ZIPDIR_PRESETS_DIR"]))
         self.preset_dirs = dirs
-        self.interpreter = interpreter or create_interpreter()
+        if interpreter is not None:
+            self.interpreter = interpreter
+        else:
+            from zipdir.interpreter import RuleInterpreter
+
+            self.interpreter = RuleInterpreter()
 
     def parse_file(self, file: Path) -> PresetModel:
         """Parse a .zipignore preset file extracting description, inherit/extends, and rule lines."""
@@ -56,12 +57,14 @@ class PresetCatalog(IPresetCatalog):
 
         for line in file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                description = self._parse_comment_directive(stripped, extends, description)
-                continue
-            rules.append(stripped)
+            match stripped:
+                case "":
+                    continue
+                case s if s.startswith("#"):
+                    description = self._parse_comment_directive(s, extends, description)
+                    continue
+                case s:
+                    rules.append(s)
 
         return PresetModel(
             name=self._extract_preset_stem(file),
@@ -78,7 +81,7 @@ class PresetCatalog(IPresetCatalog):
     def linearize_presets(
         self,
         name: str,
-        raw_presets: Mapping[str, DPreset],
+        raw_presets: Mapping[str, PresetModel],
     ) -> list[str]:
         """Minimal single-node linearization (extended with C3 MRO in linearized.py)."""
         if name not in raw_presets:
@@ -92,7 +95,7 @@ class PresetCatalog(IPresetCatalog):
     def resolve_cascade(
         self,
         source: Path,
-        presets: Mapping[str, DPreset] | None = None,
+        presets: Mapping[str, PresetModel] | None = None,
         *,
         preset: str | None = None,
         cli_rules: Sequence[str] = (),
@@ -121,33 +124,37 @@ class PresetCatalog(IPresetCatalog):
         return self.parse_file(local_file) if local_file.is_file() else None
 
     def _determine_preset_name(self, preset: str | None, local_model: PresetModel | None) -> str:
-        if preset is not None:
-            return preset
-        if local_model is not None and local_model.extends:
-            return ", ".join(local_model.extends)
-        return "clean"
+        match (preset, local_model):
+            case (str() as p, _):
+                return p
+            case (None, PresetModel(extends=extends)) if extends:
+                return ", ".join(extends)
+            case _:
+                return "clean"
 
     def _collect_tier1_rules(
         self,
         source: Path,
-        loaded_presets: Mapping[str, DPreset],
+        loaded_presets: Mapping[str, PresetModel],
         preset: str | None,
         local_model: PresetModel | None,
         effective_name: str,
     ) -> tuple[list[str], str]:
-        if preset is not None and preset in loaded_presets:
-            return list(loaded_presets[preset].rules), effective_name
-        if preset is None and "clean" in loaded_presets:
-            return list(loaded_presets["clean"].rules), effective_name
-        if preset is not None:
-            available = ", ".join(loaded_presets.keys())
-            raise ValueError(f"Unknown preset '{preset}'. Available: {available}")
-        return [], effective_name
+        match (preset, preset in loaded_presets if preset else False):
+            case (str() as p, True):
+                return list(loaded_presets[p].rules), effective_name
+            case (None, _) if "clean" in loaded_presets:
+                return list(loaded_presets["clean"].rules), effective_name
+            case (str() as p, False):
+                available = ", ".join(loaded_presets.keys())
+                raise ValueError(f"Unknown preset '{p}'. Available: {available}")
+            case _:
+                return [], effective_name
 
     def _collect_tier2_rules(
         self,
         source: Path,
-        loaded_presets: Mapping[str, DPreset],
+        loaded_presets: Mapping[str, PresetModel],
         preset: str | None,
         local_model: PresetModel | None,
     ) -> list[ScopedRule]:
@@ -156,36 +163,45 @@ class PresetCatalog(IPresetCatalog):
     def _collect_tier3_rules(
         self,
         source: Path,
-        loaded_presets: Mapping[str, DPreset],
+        loaded_presets: Mapping[str, PresetModel],
     ) -> list[ScopedRule]:
         return []
 
     def _squeeze_cascade(self, combined: Sequence[ScopedRule]) -> list[str | ScopedRule]:
         squeezed = self.interpreter.squeeze(combined)
-        return [
-            r if isinstance(r, (str, ScopedRule)) else ScopedRule(scope=r.scope, rule=r.rule)
-            for r in squeezed
-        ]
+        result: list[str | ScopedRule] = []
+        for r in squeezed:
+            match r:
+                case str() | ScopedRule():
+                    result.append(r)
+                case _:
+                    result.append(ScopedRule(scope=r.scope, rule=r.rule))
+        return result
 
     def _parse_comment_directive(self, stripped: str, extends: list[str], description: str) -> str:
         lower = stripped.lower()
-        if any(k in lower for k in ("inherit:", "extends:", "include:")):
-            val = stripped.split(":", 1)[1]
-            for p in val.split(","):
-                p_clean = p.strip()
-                if p_clean and p_clean not in extends:
-                    extends.append(p_clean)
-        elif "description:" in lower:
-            return stripped.split(":", 1)[1].strip()
-        return description
+        match lower:
+            case s if any(k in s for k in ("inherit:", "extends:", "include:")):
+                val = stripped.split(":", 1)[1]
+                for p in val.split(","):
+                    p_clean = p.strip()
+                    if p_clean and p_clean not in extends:
+                        extends.append(p_clean)
+                return description
+            case s if "description:" in s:
+                return stripped.split(":", 1)[1].strip()
+            case _:
+                return description
 
     def _extract_preset_stem(self, file: Path) -> str:
         stem = file.name
-        if stem.endswith(".zipignore"):
-            return stem.removesuffix(".zipignore")
-        if stem.endswith((".yaml", ".yml")):
-            return file.stem
-        return stem
+        match stem:
+            case s if s.endswith(".zipignore"):
+                return s.removesuffix(".zipignore")
+            case s if s.endswith((".yaml", ".yml")):
+                return file.stem
+            case s:
+                return s
 
     def _discover_raw_presets(self) -> dict[str, PresetModel]:
         raw_presets: dict[str, PresetModel] = {}

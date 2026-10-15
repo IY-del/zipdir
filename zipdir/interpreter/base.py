@@ -4,10 +4,10 @@ import re
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from zipdir.interfaces.glob import IGlobCompiler, MGlobCompiler
+from zipdir.glob import GlobExpression
+from zipdir.interfaces.glob import IGlobCompiler
 from zipdir.interfaces.interpreter import IRuleInterpreter
-from zipdir.interfaces.models import DIgnoreRule, DParsedRule, DScopedRule, RuleKind
-from zipdir.models import IgnoreRule, ParsedRule
+from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
 
 RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$")
 
@@ -17,71 +17,65 @@ class RuleInterpreter(IRuleInterpreter):
 
     glob_compiler: IGlobCompiler
 
-    def __init__(
-        self,
-        glob_compiler: IGlobCompiler | None = None,
-        create_glob: MGlobCompiler = IGlobCompiler,
-    ) -> None:
-        self.glob_compiler = glob_compiler or create_glob()
+    def __init__(self, glob_compiler: IGlobCompiler | None = None) -> None:
+        self.glob_compiler = glob_compiler if glob_compiler is not None else GlobExpression()
 
     def parse_components(self, line: str) -> ParsedRule | None:
         """Parse raw line into 4-component AST node (ParsedRule)."""
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            return None
-        if stripped.startswith(r"\!"):
-            return ParsedRule(RuleKind.EXCLUDE, "", stripped)
-
-        m = RULE_COMPONENT_PATTERN.match(stripped)
-        if not m:
-            return ParsedRule(RuleKind.EXCLUDE, "", stripped)
-
-        b1 = m.group("b1")
-        to = m.group("to").strip()
-        pattern = m.group("pattern").strip()
-        if not pattern or "?" in to:
-            return None
-
-        kind = RuleKind.REDELETE if b1 else RuleKind.RESCUE
-        return ParsedRule(kind, to, pattern)
+        match stripped:
+            case "" | str() if stripped.startswith("#"):
+                return None
+            case str() if stripped.startswith(r"\#"):
+                return ParsedRule(RuleKind.EXCLUDE, "", stripped[1:])
+            case str() if stripped.startswith(r"\!"):
+                return ParsedRule(RuleKind.EXCLUDE, "", stripped[1:])
+            case _:
+                match RULE_COMPONENT_PATTERN.match(stripped):
+                    case None:
+                        return ParsedRule(RuleKind.EXCLUDE, "", stripped)
+                    case re.Match() as m:
+                        b1 = m.group("b1")
+                        to = m.group("to").strip()
+                        pattern = m.group("pattern").strip()
+                        match (pattern, "?" in to):
+                            case ("", _) | (_, True):
+                                return None
+                            case _:
+                                kind = RuleKind.REDELETE if b1 else RuleKind.RESCUE
+                                return ParsedRule(kind, to, pattern)
 
     def interpret(self, line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
         """Parse and compile a raw rule line into an IgnoreRule."""
-        parsed = self.parse_components(line)
-        if parsed is None:
-            return None
-        return self._build_rule(line, parsed, scope)
+        match self.parse_components(line):
+            case None:
+                return None
+            case ParsedRule() as parsed:
+                return self._build_rule(line, parsed, scope)
 
-    def compile_all(
-        self, rules: Sequence[str | DScopedRule | DIgnoreRule]
-    ) -> tuple[IgnoreRule, ...]:
+    def compile_all(self, rules: Sequence[str | ScopedRule | IgnoreRule]) -> tuple[IgnoreRule, ...]:
         """Compile a sequence of raw or scoped rules into IgnoreRule objects."""
         compiled: list[IgnoreRule] = []
         for item in rules:
-            rule = self._compile_single_item(item)
-            if rule is not None:
-                compiled.append(rule)
+            match self._compile_single_item(item):
+                case IgnoreRule() as rule:
+                    compiled.append(rule)
+                case None:
+                    continue
         return tuple(compiled)
 
-    def _compile_single_item(self, item: str | DScopedRule | DIgnoreRule) -> IgnoreRule | None:
-        if isinstance(item, IgnoreRule):
-            return item
-        if isinstance(item, DIgnoreRule):
-            return IgnoreRule(
-                raw=item.raw,
-                kind=item.kind,
-                target=item.target,
-                pattern=item.pattern,
-                regex=item.regex,
-                is_dir_only=item.is_dir_only,
-                has_slash=item.has_slash,
-                scope=item.scope,
-            )
-        if isinstance(item, DScopedRule):
-            return self.interpret(item.rule, scope=item.scope)
-        return self.interpret(item)
+    def _compile_single_item(self, item: str | ScopedRule | IgnoreRule) -> IgnoreRule | None:
+        match item:
+            case IgnoreRule() as rule:
+                return rule
+            case ScopedRule(scope=scope, rule=rule_line):
+                return self.interpret(rule_line, scope=scope)
+            case str() as line:
+                return self.interpret(line)
+            case _:
+                return None
 
-    def _build_rule(self, raw: str, parsed: DParsedRule, scope: PurePosixPath) -> IgnoreRule:
+    def _build_rule(self, raw: str, parsed: ParsedRule, scope: PurePosixPath) -> IgnoreRule:
         regex, is_dir_only, has_slash = self.glob_compiler.interpret(parsed.pattern)
         return IgnoreRule(
             raw=raw,

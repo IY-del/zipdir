@@ -6,12 +6,13 @@ import zipfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.interfaces.evaluator import IPathEvaluator, MPathEvaluator
-from zipdir.interfaces.models import DIgnoreRule, DPackagerConfig, RuleKind
+from zipdir.evaluator import PathEvaluator
+from zipdir.interfaces.evaluator import IPathEvaluator
 from zipdir.interfaces.packager import IArchiveEntryWriter, IPackager
-from zipdir.interfaces.ui import IReporter, MReporter
-from zipdir.models import IgnoreRule, PackagerConfig
+from zipdir.interfaces.ui import IReporter
+from zipdir.models import IgnoreRule, PackagerConfig, RuleKind
 from zipdir.packager.writers import DEFAULT_ENTRY_WRITERS
+from zipdir.ui import ConsoleReporter
 
 
 def _is_packable_stat(path: Path) -> bool:
@@ -25,11 +26,11 @@ def _is_packable_stat(path: Path) -> bool:
 class ZipPackager(IPackager):
     """Minimal concrete packager defining the TemplateMethod skeleton for member collection."""
 
-    config: DPackagerConfig
+    config: PackagerConfig
     evaluator: IPathEvaluator
     reporter: IReporter
     entry_writers: Sequence[IArchiveEntryWriter]
-    compiled_rules: list[DIgnoreRule]
+    compiled_rules: list[IgnoreRule]
     rescued_files: list[tuple[str, str]]
     excluded_files: list[str]
 
@@ -39,28 +40,12 @@ class ZipPackager(IPackager):
         evaluator: IPathEvaluator | None = None,
         reporter: IReporter | None = None,
         entry_writers: Sequence[IArchiveEntryWriter] | None = None,
-        create_evaluator: MPathEvaluator = IPathEvaluator,
-        create_reporter: MReporter = IReporter,
     ) -> None:
         self.config = config
-        self.evaluator = evaluator or create_evaluator(config.rules)
-        self.reporter = reporter or create_reporter()
+        self.evaluator = evaluator if evaluator is not None else PathEvaluator(config.rules)
+        self.reporter = reporter if reporter is not None else ConsoleReporter()
         self.entry_writers = entry_writers if entry_writers is not None else DEFAULT_ENTRY_WRITERS
-        self.compiled_rules = [
-            r
-            if isinstance(r, IgnoreRule)
-            else IgnoreRule(
-                raw=r.raw,
-                kind=r.kind,
-                target=r.target,
-                pattern=r.pattern,
-                regex=r.regex,
-                is_dir_only=r.is_dir_only,
-                has_slash=r.has_slash,
-                scope=r.scope,
-            )
-            for r in self.evaluator.rules
-        ]
+        self.compiled_rules = list(self.evaluator.rules)
         self.rescued_files = []
         self.excluded_files = []
 
@@ -72,12 +57,13 @@ class ZipPackager(IPackager):
             rel_dir = dirpath.relative_to(self.config.source)
             self._filter_dirnames(dirpath, rel_dir, dirnames)
             for file_path, file_posix in self._iter_candidate_files(dirpath, rel_dir, filenames):
-                evaluated = self._evaluate_file(file_posix, prefix)
-                if evaluated is not None:
-                    full_arcname, arc_path, is_rescued = evaluated
-                    self._stage_member(
-                        staged, file_path, full_arcname, file_posix, arc_path, is_rescued
-                    )
+                match self._evaluate_file(file_posix, prefix):
+                    case (full_arcname, arc_path, is_rescued):
+                        self._stage_member(
+                            staged, file_path, full_arcname, file_posix, arc_path, is_rescued
+                        )
+                    case None:
+                        continue
         self._finalize_collection(staged)
         yield from staged
 
@@ -101,12 +87,18 @@ class ZipPackager(IPackager):
         return output
 
     def _archive_prefix(self) -> PurePosixPath:
-        return PurePosixPath() if self.config.flat else PurePosixPath(self.config.name)
+        match self.config.flat:
+            case True:
+                return PurePosixPath()
+            case False:
+                return PurePosixPath(self.config.name)
 
     def _init_staged_entries(self, prefix: PurePosixPath) -> list[tuple[Path, str]]:
-        if self.config.flat:
-            return []
-        return [(self.config.source, f"{prefix.as_posix()}/")]
+        match self.config.flat:
+            case True:
+                return []
+            case False:
+                return [(self.config.source, f"{prefix.as_posix()}/")]
 
     def _filter_dirnames(self, dirpath: Path, rel_dir: Path, dirnames: list[str]) -> None:
         dirnames[:] = sorted(d for d in dirnames if _is_packable_stat(dirpath / d))
@@ -125,11 +117,15 @@ class ZipPackager(IPackager):
         self, file_posix: PurePosixPath, prefix: PurePosixPath
     ) -> tuple[str, PurePosixPath, bool] | None:
         result = self.evaluator.evaluate(file_posix, is_dir=False)
-        if result.is_excluded or result.arc_path is None:
-            return None
-        full_arcname = (prefix / result.arc_path).as_posix()
-        is_rescued = result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE
-        return full_arcname, result.arc_path, is_rescued
+        match (result.is_excluded, result.arc_path):
+            case (True, _) | (_, None):
+                return None
+            case (False, PurePosixPath() as arc):
+                full_arcname = (prefix / arc).as_posix()
+                is_rescued = (
+                    result.matched_rule is not None and result.matched_rule.kind == RuleKind.RESCUE
+                )
+                return full_arcname, arc, is_rescued
 
     def _stage_member(
         self,
@@ -146,15 +142,24 @@ class ZipPackager(IPackager):
         pass
 
     def _is_self_archive(self, file_path: Path) -> bool:
-        if file_path.name.startswith(".zipdir_") and file_path.name.endswith(".zip"):
-            return True
+        match file_path.name:
+            case s if s.startswith(".zipdir_") and s.endswith(".zip"):
+                return True
+            case _:
+                pass
         resolved = file_path.resolve()
         output_resolved = self.config.output.resolve()
-        if resolved == output_resolved:
-            return True
-        if resolved.parent == output_resolved.parent and resolved.name == f"{self.config.name}.zip":
-            if output_resolved.name.startswith(
-                f"{self.config.name}_"
-            ) and output_resolved.name.endswith(".zip"):
+        match resolved == output_resolved:
+            case True:
                 return True
-        return False
+            case False:
+                match (
+                    resolved.parent == output_resolved.parent
+                    and resolved.name == f"{self.config.name}.zip"
+                ):
+                    case True:
+                        return output_resolved.name.startswith(
+                            f"{self.config.name}_"
+                        ) and output_resolved.name.endswith(".zip")
+                    case False:
+                        return False

@@ -9,24 +9,8 @@ from zipdir.evaluator.strategies import (
     EvaluationState,
 )
 from zipdir.interfaces.evaluator import IPathEvaluator, IRemapStrategy, IRuleTransition
-from zipdir.interfaces.interpreter import IRuleInterpreter, MRuleInterpreter
-from zipdir.interfaces.models import DIgnoreRule, DScopedRule, RuleKind
-from zipdir.models import EvaluationResult, IgnoreRule
-
-
-def _as_ignore_rule(rule: DIgnoreRule) -> IgnoreRule:
-    if isinstance(rule, IgnoreRule):
-        return rule
-    return IgnoreRule(
-        raw=rule.raw,
-        kind=rule.kind,
-        target=rule.target,
-        pattern=rule.pattern,
-        regex=rule.regex,
-        is_dir_only=rule.is_dir_only,
-        has_slash=rule.has_slash,
-        scope=rule.scope,
-    )
+from zipdir.interfaces.interpreter import IRuleInterpreter
+from zipdir.models import EvaluationResult, IgnoreRule, RuleKind, ScopedRule
 
 
 class PathEvaluator(IPathEvaluator):
@@ -38,17 +22,21 @@ class PathEvaluator(IPathEvaluator):
 
     def __init__(
         self,
-        rules: Sequence[DIgnoreRule | str | DScopedRule] = (),
+        rules: Sequence[IgnoreRule | str | ScopedRule] = (),
         interpreter: IRuleInterpreter | None = None,
         transitions: Mapping[RuleKind, IRuleTransition] | None = None,
         remap_strategies: Sequence[IRemapStrategy] | None = None,
-        create_interpreter: MRuleInterpreter = IRuleInterpreter,
     ) -> None:
-        if all(isinstance(r, DIgnoreRule) for r in rules):
-            self.rules = tuple(_as_ignore_rule(r) for r in rules if isinstance(r, DIgnoreRule))
+        if rules and all(isinstance(r, IgnoreRule) for r in rules):
+            self.rules = tuple(rules)  # type: ignore[arg-type]
         else:
-            compiler = interpreter or create_interpreter()
-            self.rules = tuple(_as_ignore_rule(r) for r in compiler.compile_all(rules))
+            if interpreter is not None:
+                compiler = interpreter
+            else:
+                from zipdir.interpreter import RuleInterpreter
+
+                compiler = RuleInterpreter()
+            self.rules = compiler.compile_all(rules)
         self.transitions = transitions if transitions is not None else DEFAULT_RULE_TRANSITIONS
         self.remap_strategies = (
             remap_strategies if remap_strategies is not None else DEFAULT_REMAP_STRATEGIES
@@ -59,19 +47,16 @@ class PathEvaluator(IPathEvaluator):
         state = self._evaluate_ancestors(rel_path.parts)
         self._evaluate_target(rel_path, is_dir, state)
 
-        if state.is_excluded:
-            excluded_rule = (
-                _as_ignore_rule(state.excluded_by) if state.excluded_by is not None else None
-            )
-            return EvaluationResult(True, None, excluded_rule)
-        if state.rescued_by is None:
-            return EvaluationResult(False, rel_path, None)
-
-        rescued_rule = _as_ignore_rule(state.rescued_by)
-        arc_rel = self._resolve_rescued_path(
-            rel_path, rescued_rule, state.shallowest_excluded_ancestor
-        )
-        return EvaluationResult(False, arc_rel, rescued_rule)
+        match (state.is_excluded, state.rescued_by):
+            case (True, _):
+                return EvaluationResult(True, None, state.excluded_by)
+            case (False, None):
+                return EvaluationResult(False, rel_path, None)
+            case (False, IgnoreRule() as rescued_rule):
+                arc_rel = self._resolve_rescued_path(
+                    rel_path, rescued_rule, state.shallowest_excluded_ancestor
+                )
+                return EvaluationResult(False, arc_rel, rescued_rule)
 
     def should_prune(self, rel_dir: PurePosixPath) -> bool:
         """Minimal base pruning behavior (overridden in pruning.py)."""
@@ -111,8 +96,10 @@ class PathEvaluator(IPathEvaluator):
     def _scoped_target(
         self, path: PurePosixPath, posix_str: str, scope: PurePosixPath
     ) -> str | None:
-        if scope == PurePosixPath():
-            return posix_str
-        if not path.is_relative_to(scope) or path == scope:
-            return None
-        return path.relative_to(scope).as_posix()
+        match (scope, path.is_relative_to(scope) and path != scope):
+            case (PurePosixPath(), _):
+                return posix_str
+            case (_, True):
+                return path.relative_to(scope).as_posix()
+            case _:
+                return None

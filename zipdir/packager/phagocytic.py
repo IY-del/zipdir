@@ -27,19 +27,21 @@ class ZipPackager(PrunedZipPackager):
         arc_path: PurePosixPath,
         is_rescued: bool,
     ) -> None:
-        if full_arcname in self._seen_arcnames:
-            staged[self._seen_arcnames[full_arcname]] = (file_path, full_arcname)
-        else:
-            self._seen_arcnames[full_arcname] = len(staged)
-            staged.append((file_path, full_arcname))
+        match full_arcname in self._seen_arcnames:
+            case True:
+                staged[self._seen_arcnames[full_arcname]] = (file_path, full_arcname)
+            case False:
+                self._seen_arcnames[full_arcname] = len(staged)
+                staged.append((file_path, full_arcname))
 
-        if is_rescued:
-            self._rescued_by_arcname[full_arcname] = (
-                file_posix.as_posix(),
-                arc_path.as_posix(),
-            )
-        else:
-            self._rescued_by_arcname.pop(full_arcname, None)
+        match is_rescued:
+            case True:
+                self._rescued_by_arcname[full_arcname] = (
+                    file_posix.as_posix(),
+                    arc_path.as_posix(),
+                )
+            case False:
+                self._rescued_by_arcname.pop(full_arcname, None)
 
     def _finalize_collection(self, staged: Sequence[tuple[Path, str]]) -> None:
         self.rescued_files = [

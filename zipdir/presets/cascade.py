@@ -3,8 +3,7 @@
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
-from zipdir.interfaces.models import DPreset
-from zipdir.models import ScopedRule
+from zipdir.models import PresetModel, ScopedRule
 from zipdir.presets.local import PresetCatalog as LocalPresetCatalog
 
 
@@ -27,18 +26,21 @@ class PresetCatalog(LocalPresetCatalog):
     def _collect_tier3_rules(
         self,
         source: Path,
-        loaded_presets: Mapping[str, DPreset],
+        loaded_presets: Mapping[str, PresetModel],
     ) -> list[ScopedRule]:
         tier3_rules: list[ScopedRule] = []
         for rel_dir, sub_file in self.discover_sub_zipignores(source):
             sub_model = self.parse_file(sub_file)
-            if sub_model.extends:
-                inherited = self._resolve_extended_rules(
-                    sub_model.extends,
-                    sub_file.parent,
-                    loaded_presets,
-                    sub_file,
-                )
-                tier3_rules.extend(ScopedRule(scope=rel_dir, rule=r) for r in inherited)
+            match sub_model.extends:
+                case list() as ext if ext:
+                    inherited = self._resolve_extended_rules(
+                        ext,
+                        sub_file.parent,
+                        loaded_presets,
+                        sub_file,
+                    )
+                    tier3_rules.extend(ScopedRule(scope=rel_dir, rule=r) for r in inherited)
+                case _:
+                    pass
             tier3_rules.extend(ScopedRule(scope=rel_dir, rule=r) for r in sub_model.rules)
         return tier3_rules

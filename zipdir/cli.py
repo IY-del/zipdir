@@ -8,23 +8,18 @@ from typing import Annotated
 import typer
 from typer.core import TyperCommand
 
-from zipdir.interfaces.models import DPreset
-from zipdir.interfaces.output import IOutputResolver, MOutputResolver
-from zipdir.interfaces.packager import IPackager, MPackager
-from zipdir.interfaces.presets import IPresetCatalog, MPresetCatalog
-from zipdir.interfaces.ui import IReporter, MReporter
-from zipdir.models import PackagerConfig
-from zipdir.output import resolve_output_path
-from zipdir.ui import color_yellow
+from zipdir.models import PackagerConfig, PresetModel
+from zipdir.output import OutputResolver, resolve_output_path
+from zipdir.packager import ZipPackager
+from zipdir.presets import PresetCatalog
+from zipdir.ui import ConsoleReporter, color_yellow
 
 
 class ZipdirCommand(TyperCommand):
     """Custom Typer command that normalizes bare `-o` / `--output` flags to `""` (source.parent)."""
 
-    create_resolver: MOutputResolver = IOutputResolver
-
     def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
-        resolver: IOutputResolver = self.create_resolver()
+        resolver = OutputResolver()
         normalized = resolver.normalize_cli_args(args)
         return super().parse_args(ctx, normalized)
 
@@ -38,12 +33,11 @@ app = typer.Typer(
 
 
 def print_presets(
-    presets: Mapping[str, DPreset],
-    reporter: IReporter | None = None,
-    create_reporter: MReporter = IReporter,
+    presets: Mapping[str, PresetModel],
+    reporter: ConsoleReporter | None = None,
 ) -> None:
     """Display available presets and their configurations."""
-    active_reporter: IReporter = reporter or create_reporter()
+    active_reporter = reporter if reporter is not None else ConsoleReporter()
     active_reporter.print_presets(presets)
 
 
@@ -156,12 +150,8 @@ def package(
         typer.Option("--dry-run", help="Show resulting members without creating ZIP"),
     ] = False,
 ) -> None:
-    create_catalog: MPresetCatalog = IPresetCatalog
-    create_reporter: MReporter = IReporter
-    create_packager: MPackager = IPackager
-
-    catalog: IPresetCatalog = create_catalog()
-    reporter: IReporter = create_reporter()
+    catalog = PresetCatalog()
+    reporter = ConsoleReporter()
     presets = catalog.load_all()
 
     if list_presets:
@@ -205,7 +195,7 @@ def package(
         verbose=verbose,
     )
 
-    packager: IPackager = create_packager(config, reporter=reporter)
+    packager = ZipPackager(config, reporter=reporter)
     try:
         packager.package()
     except (FileExistsError, FileNotFoundError, ValueError) as e:
@@ -216,32 +206,38 @@ def package(
 def _resolve_cli_targets(
     directory: str | None, output_path: str | None, output: str | None
 ) -> tuple[str, str | None]:
-    if directory is None:
-        return ".", output
-    if output_path is None and directory.endswith(".zip"):
-        return ".", output if output is not None else directory
-    return directory, output if output is not None else output_path
+    match (directory, output_path, output):
+        case (None, _, _):
+            return ".", output
+        case (str() as d, None, _) if d.endswith(".zip"):
+            return ".", output if output is not None else d
+        case _:
+            return directory, output if output is not None else output_path
 
 
 def _validate_source_dir(target_dir_str: str) -> Path:
     source = Path(target_dir_str).expanduser().resolve()
-    if not source.is_dir():
-        print(f"{color_yellow('Error:')} Not a directory: {source}", file=sys.stderr)
-        raise typer.Exit(code=1)
-    return source
+    match source.is_dir():
+        case False:
+            print(f"{color_yellow('Error:')} Not a directory: {source}", file=sys.stderr)
+            raise typer.Exit(code=1)
+        case True:
+            return source
 
 
 def _validate_archive_name(name: str | None, source: Path) -> str:
     archive_name = name if name is not None else source.name
-    if (
+    match (
         not archive_name
         or archive_name in (".", "..")
         or "/" in archive_name
         or "\\" in archive_name
     ):
-        print(
-            f"{color_yellow('Error:')} --name must be a nonempty single directory name",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=1)
-    return archive_name
+        case True:
+            print(
+                f"{color_yellow('Error:')} --name must be a nonempty single directory name",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=1)
+        case False:
+            return archive_name

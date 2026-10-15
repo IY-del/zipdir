@@ -6,37 +6,49 @@ from zipdir.interfaces.output import IOutputTargetStrategy
 
 
 class BareParentOutputStrategy(IOutputTargetStrategy):
-    """Concrete Strategy for bare `-o` (`""`): resolves to `<source.parent>/` directory."""
+    """Strategy for bare `-o` (`""`): resolves to `<source.parent>/` directory."""
 
     def matches(self, raw: str) -> bool:
-        return raw == ""
+        match raw:
+            case "":
+                return True
+            case _:
+                return False
 
     def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
         return source.parent, True
 
 
 class AbsoluteOutputStrategy(IOutputTargetStrategy):
-    """Concrete Strategy for `/...` or `~` / `~/...`: resolves as an absolute filesystem path."""
+    """Strategy for `/...` or `~` / `~/...`: resolves as an absolute filesystem path."""
 
     def matches(self, raw: str) -> bool:
-        return raw.startswith("/") or raw == "~" or raw.startswith("~/")
+        match raw:
+            case "~" | str() if raw.startswith(("/", "~/")):
+                return True
+            case _:
+                return False
 
     def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
         return Path(raw).expanduser(), raw.endswith("/")
 
 
 class CwdRelativeOutputStrategy(IOutputTargetStrategy):
-    """Concrete Strategy for `.`, `..`, `./...`, or `../...`: resolves relative to cwd."""
+    """Strategy for `.`, `..`, `./...`, or `../...`: resolves relative to cwd."""
 
     def matches(self, raw: str) -> bool:
-        return raw in (".", "..") or raw.startswith("./") or raw.startswith("../")
+        match raw:
+            case "." | ".." | str() if raw.startswith(("./", "../")):
+                return True
+            case _:
+                return False
 
     def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
         return cwd / raw, raw in (".", "..") or raw.endswith("/")
 
 
 class ParentRelativeOutputStrategy(IOutputTargetStrategy):
-    """Concrete fallback Strategy (`___` without prefix): resolves relative to `<source.parent>`."""
+    """Fallback Strategy (`___` without prefix): resolves relative to `<source.parent>`."""
 
     def matches(self, raw: str) -> bool:
         return True
