@@ -1,65 +1,38 @@
-"""Compile-time rule squeezing via Strategy and progressive inheritance over RuleInterpreter."""
+"""Concrete compile-time rule squeezing via Strategy and progressive inheritance."""
 
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 
-from zipdir.interpreter import (
-    RuleInterpreter as BaseRuleInterpreter,
+from zipdir.interfaces import (
+    DIgnoreRule,
+    DParsedRule,
+    DScopedRule,
+    DSqueezeBuffer,
+    IGlobCompiler,
+    IRuleSqueezer,
+    ISqueezeStrategy,
+    MGlobCompiler,
+    RuleKind,
 )
-from zipdir.interpreter import (
+from zipdir.interpreter import RuleInterpreter as BaseRuleInterpreter
+from zipdir.models import (
+    IgnoreRule,
+    ParsedRule,
+    ScopedRule,
+    SqueezeBuffer,
     redelete_matches_rescue,
 )
-from zipdir.models import (
-    IGlobCompiler,
-    IgnoreRule,
-    IRuleSqueezer,
-    ParsedRule,
-    RuleKind,
-    ScopedRule,
-)
-
-
-class DSqueezeBuffer[T]:
-    """Mutable buffer state invariant for compile-time rule squeezing."""
-
-    items: list[T]
-    parsed_meta: list[ParsedRule]
-    seen: dict[tuple[PurePosixPath, str], list[int]]
-
-    def __init__(self) -> None:
-        self.items = []
-        self.parsed_meta = []
-        self.seen = {}
-
-    def shift_indices(self, removed_idx: int) -> None:
-        """Adjust recorded index positions after an element removal."""
-        for key, idx_list in self.seen.items():
-            self.seen[key] = [i - 1 if i > removed_idx else i for i in idx_list if i != removed_idx]
-
-
-class ISqueezeStrategy:
-    """Nominal Strategy interface for resolving rule collisions on identical (scope, pattern)."""
-
-    def apply[T](
-        self,
-        buffer: DSqueezeBuffer[T],
-        key: tuple[PurePosixPath, str],
-        indices: list[int],
-        parsed: ParsedRule,
-        entry: T,
-    ) -> None:
-        raise NotImplementedError
 
 
 class OverwriteSqueezeStrategy(ISqueezeStrategy):
-    """Strategy for EXCLUDE and RESCUE: engulfs all prior rules sharing (scope, pattern)."""
+    """Concrete Strategy for EXCLUDE and RESCUE: engulfs all prior rules sharing (scope, pattern)."""
 
     def apply[T](
         self,
         buffer: DSqueezeBuffer[T],
         key: tuple[PurePosixPath, str],
         indices: list[int],
-        parsed: ParsedRule,
+        parsed: DParsedRule,
         entry: T,
     ) -> None:
         primary_idx = indices[0]
@@ -74,14 +47,14 @@ class OverwriteSqueezeStrategy(ISqueezeStrategy):
 
 
 class TargetedRedeleteSqueezeStrategy(ISqueezeStrategy):
-    """Strategy for REDELETE: replaces matching-target RESCUE/REDELETE or appends independently."""
+    """Concrete Strategy for REDELETE: replaces matching-target RESCUE/REDELETE or appends."""
 
     def apply[T](
         self,
         buffer: DSqueezeBuffer[T],
         key: tuple[PurePosixPath, str],
         indices: list[int],
-        parsed: ParsedRule,
+        parsed: DParsedRule,
         entry: T,
     ) -> None:
         matched_idx = self._find_matching_index(parsed.target, indices, buffer.parsed_meta)
@@ -97,7 +70,7 @@ class TargetedRedeleteSqueezeStrategy(ISqueezeStrategy):
         self,
         redelete_target: str,
         indices: list[int],
-        parsed_meta: list[ParsedRule],
+        parsed_meta: Sequence[DParsedRule],
     ) -> int | None:
         for idx in reversed(indices):
             candidate = parsed_meta[idx]
@@ -116,7 +89,7 @@ DEFAULT_SQUEEZE_STRATEGIES: dict[RuleKind, ISqueezeStrategy] = {
 
 
 class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
-    """Extends base RuleInterpreter with target-aware compile-time phagocytosis (rule squeezing)."""
+    """Concrete squeezer extending base RuleInterpreter via progressive inheritance."""
 
     squeeze_strategies: Mapping[RuleKind, ISqueezeStrategy]
 
@@ -124,42 +97,58 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
         self,
         glob_compiler: IGlobCompiler | None = None,
         squeeze_strategies: Mapping[RuleKind, ISqueezeStrategy] | None = None,
+        create_glob: MGlobCompiler = IGlobCompiler,
     ) -> None:
-        super().__init__(glob_compiler=glob_compiler)
+        super().__init__(glob_compiler=glob_compiler, create_glob=create_glob)
         self.squeeze_strategies = (
             squeeze_strategies if squeeze_strategies is not None else DEFAULT_SQUEEZE_STRATEGIES
         )
 
-    def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
+    def squeeze(self, rules: Sequence[str | DScopedRule]) -> list[str | ScopedRule]:
         """Squeeze rule lines by pattern and scope with target-aware phagocytosis."""
-        normalized: list[tuple[PurePosixPath, ParsedRule, str | ScopedRule]] = []
+        normalized: list[tuple[PurePosixPath, DParsedRule, str | ScopedRule]] = []
         for item in rules:
-            scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
-            line = item.rule if isinstance(item, ScopedRule) else item
+            scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
+            line = item.rule if isinstance(item, DScopedRule) else item
+            out_item: str | ScopedRule = (
+                item
+                if isinstance(item, (str, ScopedRule))
+                else ScopedRule(scope=item.scope, rule=item.rule)
+            )
             parsed = self.parse_components(line)
             if parsed is not None:
-                normalized.append((scope, parsed, item))
+                normalized.append((scope, parsed, out_item))
         return self._squeeze_staged(normalized)
 
     def compile_all(
-        self, rules: Sequence[str | ScopedRule | IgnoreRule], *, squeeze: bool = False
+        self, rules: Sequence[str | DScopedRule | DIgnoreRule], *, squeeze: bool = False
     ) -> tuple[IgnoreRule, ...]:
-        """Compile a sequence of raw or scoped rules into IgnoreRule objects.
-
-        When `squeeze=True`, performs target-aware compile-time phagocytosis by (scope, pattern).
-        """
+        """Compile a sequence of raw or scoped rules into IgnoreRule objects."""
         if not squeeze:
             return super().compile_all(rules)
 
-        type StagedEntry = tuple[str, ParsedRule, PurePosixPath] | IgnoreRule
-        normalized: list[tuple[PurePosixPath, ParsedRule, StagedEntry]] = []
+        type StagedEntry = tuple[str, DParsedRule, PurePosixPath] | IgnoreRule
+        normalized: list[tuple[PurePosixPath, DParsedRule, StagedEntry]] = []
         for item in rules:
             if isinstance(item, IgnoreRule):
                 parsed = ParsedRule(item.kind, item.target, item.pattern)
                 normalized.append((item.scope, parsed, item))
+            elif isinstance(item, DIgnoreRule):
+                concrete_rule = IgnoreRule(
+                    raw=item.raw,
+                    kind=item.kind,
+                    target=item.target,
+                    pattern=item.pattern,
+                    regex=item.regex,
+                    is_dir_only=item.is_dir_only,
+                    has_slash=item.has_slash,
+                    scope=item.scope,
+                )
+                parsed = ParsedRule(item.kind, item.target, item.pattern)
+                normalized.append((item.scope, parsed, concrete_rule))
             else:
-                scope = item.scope if isinstance(item, ScopedRule) else PurePosixPath()
-                line = item.rule if isinstance(item, ScopedRule) else item
+                scope = item.scope if isinstance(item, DScopedRule) else PurePosixPath()
+                line = item.rule if isinstance(item, DScopedRule) else item
                 parsed_opt = self.parse_components(line)
                 if parsed_opt is not None:
                     normalized.append((scope, parsed_opt, (line, parsed_opt, scope)))
@@ -170,10 +159,10 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
         )
 
     def _squeeze_staged[T](
-        self, entries: Sequence[tuple[PurePosixPath, ParsedRule, T]]
+        self, entries: Sequence[tuple[PurePosixPath, DParsedRule, T]]
     ) -> list[T]:
         """Template skeleton that squeezes normalized rule entries using RuleKind strategies."""
-        buffer: DSqueezeBuffer[T] = DSqueezeBuffer()
+        buffer: SqueezeBuffer[T] = SqueezeBuffer()
         for scope, parsed, payload in entries:
             key = (scope, parsed.pattern)
             indices = buffer.seen.get(key)
@@ -187,15 +176,13 @@ class RuleInterpreter(BaseRuleInterpreter, IRuleSqueezer):
         return buffer.items
 
 
-def squeeze_rules(rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
+def squeeze_rules(rules: Sequence[str | DScopedRule]) -> list[str | ScopedRule]:
     """Squeeze rule lines by pattern and scope."""
     return RuleInterpreter().squeeze(rules)
 
 
 __all__ = [
     "DEFAULT_SQUEEZE_STRATEGIES",
-    "DSqueezeBuffer",
-    "ISqueezeStrategy",
     "OverwriteSqueezeStrategy",
     "RuleInterpreter",
     "TargetedRedeleteSqueezeStrategy",

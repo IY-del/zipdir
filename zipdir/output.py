@@ -1,24 +1,15 @@
-"""Output path resolution with 3-tier prefix Strategy and timestamp collision fallback."""
+"""Concrete output path resolution with 3-tier prefix Strategy and collision fallback."""
 
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from zipdir.models import IOutputResolver, ResolvedOutput
-
-
-class IOutputTargetStrategy:
-    """Nominal Strategy interface for classifying 3-tier raw output path prefixes."""
-
-    def matches(self, raw: str) -> bool:
-        raise NotImplementedError
-
-    def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
-        raise NotImplementedError
+from zipdir.interfaces import IOutputResolver, IOutputTargetStrategy
+from zipdir.models import ResolvedOutput
 
 
 class BareParentOutputStrategy(IOutputTargetStrategy):
-    """Matches bare `-o` (`""`): resolves to `<source.parent>/` directory."""
+    """Concrete Strategy for bare `-o` (`""`): resolves to `<source.parent>/` directory."""
 
     def matches(self, raw: str) -> bool:
         return raw == ""
@@ -28,7 +19,7 @@ class BareParentOutputStrategy(IOutputTargetStrategy):
 
 
 class AbsoluteOutputStrategy(IOutputTargetStrategy):
-    """Matches `/...` or `~` / `~/...`: resolves as an absolute filesystem path."""
+    """Concrete Strategy for `/...` or `~` / `~/...`: resolves as an absolute filesystem path."""
 
     def matches(self, raw: str) -> bool:
         return raw.startswith("/") or raw == "~" or raw.startswith("~/")
@@ -38,7 +29,7 @@ class AbsoluteOutputStrategy(IOutputTargetStrategy):
 
 
 class CwdRelativeOutputStrategy(IOutputTargetStrategy):
-    """Matches `.`, `..`, `./...`, or `../...`: resolves relative to current working directory."""
+    """Concrete Strategy for `.`, `..`, `./...`, or `../...`: resolves relative to cwd."""
 
     def matches(self, raw: str) -> bool:
         return raw in (".", "..") or raw.startswith("./") or raw.startswith("../")
@@ -48,7 +39,7 @@ class CwdRelativeOutputStrategy(IOutputTargetStrategy):
 
 
 class ParentRelativeOutputStrategy(IOutputTargetStrategy):
-    """Default fallback strategy (`___` without prefix): resolves relative to `<source.parent>`."""
+    """Concrete fallback Strategy (`___` without prefix): resolves relative to `<source.parent>`."""
 
     def matches(self, raw: str) -> bool:
         return True
@@ -66,7 +57,7 @@ DEFAULT_OUTPUT_TARGET_STRATEGIES: tuple[IOutputTargetStrategy, ...] = (
 
 
 class OutputResolver(IOutputResolver):
-    """Resolves archive output paths according to 3-tier prefix rules and collision fallback."""
+    """Concrete resolver for archive output paths according to 3-tier prefix rules and fallback."""
 
     cwd: Path
     timestamp_fn: Callable[[], str]

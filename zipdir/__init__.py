@@ -1,26 +1,21 @@
-"""zipdir package: Smart directory packaging with .zipignore rules and remapping."""
+"""zipdir package: Composition Root assembling interfaces (D*/I*/M*) and concrete implementations."""
 
-from zipdir.cli import ZipdirCommand, app, package
 from zipdir.evaluator import (
     ArchiveRootRemapStrategy,
-    EvaluationState,
     ExcludeTransition,
     ExileRemapStrategy,
-    IRemapStrategy,
-    IRuleTransition,
     LocalScopeRemapStrategy,
     ParentClimbRemapStrategy,
     PathEvaluator,
     PreserveHierarchyRemapStrategy,
     RedeleteTransition,
-    RemapContext,
     RescueTransition,
     evaluate_path,
 )
 from zipdir.glob import GlobExpression
-from zipdir.interpreter import compile_rule
-from zipdir.models import (
+from zipdir.interfaces import (
     DEvaluationResult,
+    DEvaluationState,
     DGlobCompiler,
     DIgnoreRule,
     DOutputResolver,
@@ -30,38 +25,62 @@ from zipdir.models import (
     DPathEvaluator,
     DPreset,
     DPresetCatalog,
+    DRemapContext,
     DReporter,
     DResolvedOutput,
     DRuleInterpreter,
+    DRuleSqueezer,
     DScopedRule,
-    EvaluationResult,
+    DSqueezeBuffer,
+    IArchiveEntryWriter,
     IGlobCompiler,
-    IgnoreRule,
     IOutputResolver,
+    IOutputTargetStrategy,
     IPackager,
     IPathEvaluator,
     IPresetCatalog,
+    IRemapStrategy,
     IReporter,
     IRuleInterpreter,
     IRuleSqueezer,
+    IRuleTransition,
+    ISqueezeStrategy,
+    MGlobCompiler,
+    MInterface,
+    MOutputResolver,
+    MPackager,
+    MPathEvaluator,
+    MPresetCatalog,
+    MReporter,
+    MRuleInterpreter,
+    MRuleSqueezer,
+    RuleKind,
+)
+from zipdir.interpreter import compile_rule
+from zipdir.models import (
+    EvaluationResult,
+    EvaluationState,
+    IgnoreRule,
     PackagerConfig,
     ParsedRule,
     PresetModel,
+    RemapContext,
     ResolvedOutput,
-    RuleKind,
     ScopedRule,
+    SqueezeBuffer,
+    normalize_posix_path,
+    normalize_target,
+    redelete_matches_rescue,
 )
 from zipdir.output import (
     AbsoluteOutputStrategy,
     BareParentOutputStrategy,
     CwdRelativeOutputStrategy,
-    IOutputTargetStrategy,
     OutputResolver,
     ParentRelativeOutputStrategy,
     resolve_output_path,
 )
 from zipdir.packager import (
-    IArchiveEntryWriter,
     RegularFileArchiveWriter,
     RootDirArchiveWriter,
     SymlinkArchiveWriter,
@@ -75,14 +94,13 @@ from zipdir.presets import (
     load_raw_zipignore_preset,
 )
 from zipdir.squeezer import (
-    DSqueezeBuffer,
-    ISqueezeStrategy,
     OverwriteSqueezeStrategy,
     RuleInterpreter,
     TargetedRedeleteSqueezeStrategy,
     squeeze_rules,
 )
 from zipdir.ui import ConsoleReporter, format_size
+from zipdir.cli import ZipdirCommand, app, package  # isort: skip
 
 __all__ = [
     "AbsoluteOutputStrategy",
@@ -92,6 +110,7 @@ __all__ = [
     "CwdRelativeOutputStrategy",
     "DEFAULT_PRESET_DIRS",
     "DEvaluationResult",
+    "DEvaluationState",
     "DGlobCompiler",
     "DIgnoreRule",
     "DOutputResolver",
@@ -101,9 +120,11 @@ __all__ = [
     "DPathEvaluator",
     "DPreset",
     "DPresetCatalog",
+    "DRemapContext",
     "DReporter",
     "DResolvedOutput",
     "DRuleInterpreter",
+    "DRuleSqueezer",
     "DScopedRule",
     "DSqueezeBuffer",
     "EvaluationResult",
@@ -126,6 +147,15 @@ __all__ = [
     "ISqueezeStrategy",
     "IgnoreRule",
     "LocalScopeRemapStrategy",
+    "MGlobCompiler",
+    "MInterface",
+    "MOutputResolver",
+    "MPackager",
+    "MPathEvaluator",
+    "MPresetCatalog",
+    "MReporter",
+    "MRuleInterpreter",
+    "MRuleSqueezer",
     "OutputResolver",
     "OverwriteSqueezeStrategy",
     "PackagerConfig",
@@ -145,6 +175,7 @@ __all__ = [
     "RuleInterpreter",
     "RuleKind",
     "ScopedRule",
+    "SqueezeBuffer",
     "SymlinkArchiveWriter",
     "TargetedRedeleteSqueezeStrategy",
     "ZipPackager",
@@ -156,7 +187,10 @@ __all__ = [
     "format_size",
     "load_presets",
     "load_raw_zipignore_preset",
+    "normalize_posix_path",
+    "normalize_target",
     "package",
+    "redelete_matches_rescue",
     "resolve_output_path",
     "squeeze_rules",
 ]

@@ -1,12 +1,17 @@
-"""Preset definition, loading, C3 linearization, and 4-tier cascade resolution."""
+"""Concrete preset definition, loading, C3 linearization, and 4-tier cascade resolution."""
 
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.models import IPresetCatalog, IRuleSqueezer, PresetModel, ScopedRule
-from zipdir.squeezer import RuleInterpreter
+from zipdir.interfaces import (
+    DPreset,
+    IPresetCatalog,
+    IRuleSqueezer,
+    MRuleSqueezer,
+)
+from zipdir.models import PresetModel, ScopedRule
 
 DEFAULT_PRESET_DIRS: list[Path] = [
     Path(__file__).resolve().parent.parent / "presets",
@@ -16,8 +21,20 @@ DEFAULT_PRESET_DIRS: list[Path] = [
 ]
 
 
+def _as_preset_model(preset: DPreset) -> PresetModel:
+    if isinstance(preset, PresetModel):
+        return preset
+    return PresetModel(
+        name=preset.name,
+        description=preset.description,
+        rules=list(preset.rules),
+        extends=list(preset.extends),
+        source_path=preset.source_path,
+    )
+
+
 class PresetCatalog(IPresetCatalog):
-    """Manages preset discovery, C3 inheritance linearization, and 4-tier .zipignore rule cascading."""
+    """Concrete preset catalog managing C3 inheritance linearization and 4-tier rule cascading."""
 
     preset_dirs: list[Path]
     interpreter: IRuleSqueezer
@@ -26,12 +43,13 @@ class PresetCatalog(IPresetCatalog):
         self,
         preset_dirs: Sequence[Path] | None = None,
         interpreter: IRuleSqueezer | None = None,
+        create_interpreter: MRuleSqueezer = IRuleSqueezer,
     ) -> None:
         dirs = list(preset_dirs) if preset_dirs is not None else list(DEFAULT_PRESET_DIRS)
         if "ZIPDIR_PRESETS_DIR" in os.environ:
             dirs.insert(0, Path(os.environ["ZIPDIR_PRESETS_DIR"]))
         self.preset_dirs = dirs
-        self.interpreter = interpreter or RuleInterpreter()
+        self.interpreter = interpreter or create_interpreter()
 
     def parse_file(self, file: Path) -> PresetModel:
         """Parse a .zipignore preset file extracting description, inherit/extends, and rule lines."""
@@ -67,7 +85,7 @@ class PresetCatalog(IPresetCatalog):
         )
 
     def load_all(self) -> dict[str, PresetModel]:
-        """Discover and load presets from configuration directories, resolving inheritance via C3 linearization."""
+        """Discover and load presets from configuration directories, resolving inheritance via C3."""
         raw_presets = self._discover_raw_presets()
         presets: dict[str, PresetModel] = {}
 
@@ -92,14 +110,9 @@ class PresetCatalog(IPresetCatalog):
     def linearize_presets(
         self,
         name: str,
-        raw_presets: Mapping[str, PresetModel],
+        raw_presets: Mapping[str, DPreset],
     ) -> list[str]:
-        """Return the base-to-derived rule application order for `name` using C3 linearization.
-
-        In `.zipignore`, `# inherit: p1, p2` declares `p1` as base and `p2` as override.
-        In MRO (most-specific first) terms, direct parents are ordered `[p2, p1]`, and the
-        resulting C3 MRO is reversed to yield the base-to-derived evaluation sequence.
-        """
+        """Return the base-to-derived rule application order for `name` using C3 linearization."""
 
         def get_mro_parents(node: str) -> list[str]:
             if node not in raw_presets:
@@ -193,7 +206,7 @@ class PresetCatalog(IPresetCatalog):
     def _resolve_preset_chain(
         self,
         name: str,
-        raw_presets: Mapping[str, PresetModel],
+        raw_presets: Mapping[str, DPreset],
     ) -> tuple[str, list[str], Path | None]:
         order = self.linearize_presets(name, raw_presets)
         merged_rules: list[str] = []
@@ -213,14 +226,14 @@ class PresetCatalog(IPresetCatalog):
         self,
         extends: Sequence[str],
         base_dir: Path,
-        loaded_presets: Mapping[str, PresetModel],
+        loaded_presets: Mapping[str, DPreset],
         root_file: Path | None = None,
     ) -> list[str]:
         """Resolve `# inherit:` / `# extends:` / `# include:` targets using C3 linearization."""
-        raw_presets = self._discover_raw_presets()
+        raw_presets: dict[str, PresetModel] = dict(self._discover_raw_presets())
         for k, v in loaded_presets.items():
             if k not in raw_presets:
-                raw_presets[k] = v
+                raw_presets[k] = _as_preset_model(v)
 
         models_by_key: dict[str, PresetModel] = dict(raw_presets)
         base_dirs_by_key: dict[str, Path] = {
@@ -285,7 +298,7 @@ class PresetCatalog(IPresetCatalog):
     def resolve_cascade(
         self,
         source: Path,
-        presets: dict[str, PresetModel] | None = None,
+        presets: Mapping[str, DPreset] | None = None,
         *,
         preset: str | None = None,
         cli_rules: Sequence[str] = (),
@@ -352,12 +365,19 @@ class PresetCatalog(IPresetCatalog):
         tier4_rules = [ScopedRule(rule=r) for r in cli_rules]
 
         combined_raw = tier1_rules + tier2_rules + tier3_rules + tier4_rules
-        return effective_preset_name, self.interpreter.squeeze(combined_raw)
+        squeezed = self.interpreter.squeeze(combined_raw)
+        out_rules: list[str | ScopedRule] = [
+            r
+            if isinstance(r, (str, ScopedRule))
+            else ScopedRule(scope=r.scope, rule=r.rule)
+            for r in squeezed
+        ]
+        return effective_preset_name, out_rules
 
     def _resolve_tier1_base(
         self,
         source: Path,
-        loaded_presets: Mapping[str, PresetModel],
+        loaded_presets: Mapping[str, DPreset],
         *,
         preset: str | None,
         local_extends: Sequence[str],

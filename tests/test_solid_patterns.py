@@ -1,11 +1,23 @@
-"""Unit tests for D* data invariants, I* nominal interfaces (DIP/ISP/LSP), and Strategy/Bridge patterns."""
+"""Unit tests verifying module separation of interfaces.py vs concrete modules, D* invariants, I*/M*, and Strategy/Bridge."""
 
+import ast
+import inspect
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
 
+import zipdir.evaluator
+import zipdir.glob
+import zipdir.interfaces
+import zipdir.interpreter
+import zipdir.models
+import zipdir.output
+import zipdir.packager
+import zipdir.presets
+import zipdir.squeezer
+import zipdir.ui
 from zipdir import (
     ArchiveRootRemapStrategy,
     ConsoleReporter,
@@ -22,6 +34,7 @@ from zipdir import (
     DReporter,
     DResolvedOutput,
     DRuleInterpreter,
+    DRuleSqueezer,
     DScopedRule,
     EvaluationResult,
     ExileRemapStrategy,
@@ -37,6 +50,14 @@ from zipdir import (
     IRuleInterpreter,
     IRuleSqueezer,
     LocalScopeRemapStrategy,
+    MGlobCompiler,
+    MOutputResolver,
+    MPackager,
+    MPathEvaluator,
+    MPresetCatalog,
+    MReporter,
+    MRuleInterpreter,
+    MRuleSqueezer,
     OutputResolver,
     OverwriteSqueezeStrategy,
     PackagerConfig,
@@ -55,6 +76,66 @@ from zipdir import (
     ZipPackager,
     compile_rule,
 )
+
+
+class TestInterfaceConcreteModuleSeparation:
+    """Verifies that interfaces.py and concrete modules are strictly separated (DIP Section 3.5)."""
+
+    def test_interfaces_module_has_zero_concrete_dependencies(self) -> None:
+        """interfaces.py must not import any zipdir.* module."""
+        source = inspect.getsource(zipdir.interfaces)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith("zipdir"), (
+                        f"interfaces.py must not import {alias.name}"
+                    )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                assert not node.module.startswith("zipdir"), (
+                    f"interfaces.py must not import from {node.module}"
+                )
+
+    def test_concrete_modules_do_not_define_interfaces(self) -> None:
+        """Concrete modules must not define D*, I*, or M* interface classes."""
+        concrete_modules = [
+            zipdir.models,
+            zipdir.glob,
+            zipdir.interpreter,
+            zipdir.squeezer,
+            zipdir.evaluator,
+            zipdir.output,
+            zipdir.presets,
+            zipdir.ui,
+            zipdir.packager,
+        ]
+        for mod in concrete_modules:
+            source = inspect.getsource(mod)
+            tree = ast.parse(source)
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef):
+                    assert not node.name.startswith(("I", "D", "M")), (
+                        f"Interface/contract {node.name} must reside in interfaces.py, not {mod.__name__}"
+                    )
+
+    def test_high_level_concrete_modules_depend_only_on_interfaces_and_models(self) -> None:
+        """High-level concrete modules (packager, presets, evaluator, interpreter) must not import sibling concrete modules."""
+        for mod in (
+            zipdir.glob,
+            zipdir.interpreter,
+            zipdir.evaluator,
+            zipdir.output,
+            zipdir.presets,
+            zipdir.ui,
+            zipdir.packager,
+        ):
+            source = inspect.getsource(mod)
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("zipdir."):
+                    assert node.module in ("zipdir.interfaces", "zipdir.models"), (
+                        f"{mod.__name__} directly imports concrete module {node.module}, violating DIP"
+                    )
 
 
 class TestDataModelInvariants:
@@ -124,17 +205,36 @@ class TestDataModelInvariants:
             )
 
 
-class TestNominalInterfacesAndDIP:
-    """Verifies I* nominal subtyping without abc.ABC and Bridge constructor injection."""
+class TestNominalInterfacesAndFactoryMethod:
+    """Verifies I* nominal subtyping, M* FactoryMethod metaclasses, and Bridge DI."""
 
-    def test_nominal_interface_subtyping(self) -> None:
+    def test_nominal_interface_and_metaclass_subtyping(self) -> None:
         assert issubclass(GlobExpression, (IGlobCompiler, DGlobCompiler))
-        assert issubclass(RuleInterpreter, (IRuleSqueezer, IRuleInterpreter, DRuleInterpreter))
+        assert isinstance(GlobExpression, MGlobCompiler)
+        assert issubclass(
+            RuleInterpreter, (IRuleSqueezer, DRuleSqueezer, IRuleInterpreter, DRuleInterpreter)
+        )
+        assert isinstance(RuleInterpreter, (MRuleSqueezer, MRuleInterpreter))
         assert issubclass(PathEvaluator, (IPathEvaluator, DPathEvaluator))
+        assert isinstance(PathEvaluator, MPathEvaluator)
         assert issubclass(OutputResolver, (IOutputResolver, DOutputResolver))
+        assert isinstance(OutputResolver, MOutputResolver)
         assert issubclass(PresetCatalog, (IPresetCatalog, DPresetCatalog))
+        assert isinstance(PresetCatalog, MPresetCatalog)
         assert issubclass(ConsoleReporter, (IReporter, DReporter))
+        assert isinstance(ConsoleReporter, MReporter)
         assert issubclass(ZipPackager, (IPackager, DPackager))
+        assert isinstance(ZipPackager, MPackager)
+
+    def test_factory_method_instantiation_through_interface(self) -> None:
+        glob_inst = IGlobCompiler()
+        assert isinstance(glob_inst, GlobExpression)
+
+        squeezer_inst = IRuleSqueezer()
+        assert isinstance(squeezer_inst, RuleInterpreter)
+
+        evaluator_inst = IPathEvaluator(["*.log"])
+        assert isinstance(evaluator_inst, PathEvaluator)
 
     def test_bridge_custom_reporter_injection(self, tmp_path: Path) -> None:
         class RecordingReporter(IReporter):
@@ -143,12 +243,12 @@ class TestNominalInterfacesAndDIP:
                 self.dry_run_called = False
                 self.recorded_entries: list[str] = []
 
-            def print_presets(self, presets: Mapping[str, PresetModel]) -> None:
+            def print_presets(self, presets: Mapping[str, DPreset]) -> None:
                 pass
 
             def print_dry_run(
                 self,
-                config: PackagerConfig,
+                config: DPackagerConfig,
                 entries: Sequence[tuple[Path, str]],
                 rescued_files: Sequence[tuple[str, str]],
                 excluded_files: Sequence[str],
@@ -158,7 +258,7 @@ class TestNominalInterfacesAndDIP:
 
             def print_summary(
                 self,
-                config: PackagerConfig,
+                config: DPackagerConfig,
                 output: Path,
                 entries: Sequence[tuple[Path, str]],
                 rescued_files: Sequence[tuple[str, str]],
@@ -216,7 +316,7 @@ class TestStrategyPatterns:
             def matches(self, target: str) -> bool:
                 return target == "custom_hook"
 
-            def remap(self, ctx: RemapContext) -> PurePosixPath:
+            def remap(self, ctx: RemapContext) -> PurePosixPath:  # type: ignore[override]
                 return PurePosixPath("hooked") / ctx.sub_path
 
         evaluator = PathEvaluator(

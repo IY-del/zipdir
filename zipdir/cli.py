@@ -1,31 +1,36 @@
-"""Command Line Interface for zipdir."""
+"""Command Line Interface and Composition Root wiring for zipdir."""
 
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from typer.core import TyperCommand
 
-from zipdir.models import (
+from zipdir.interfaces import (
+    DPreset,
     IOutputResolver,
     IPackager,
     IPresetCatalog,
     IReporter,
-    PackagerConfig,
-    PresetModel,
+    MOutputResolver,
+    MPackager,
+    MPresetCatalog,
+    MReporter,
 )
-from zipdir.output import OutputResolver, resolve_output_path
-from zipdir.packager import ZipPackager
-from zipdir.presets import PresetCatalog
-from zipdir.ui import ConsoleReporter, color_yellow
+from zipdir.models import PackagerConfig
+from zipdir.output import resolve_output_path
+from zipdir.ui import color_yellow
 
 
 class ZipdirCommand(TyperCommand):
     """Custom Typer command that normalizes bare `-o` / `--output` flags to `""` (source.parent)."""
 
+    create_resolver: MOutputResolver = IOutputResolver
+
     def parse_args(self, ctx: typer.Context, args: list[str]) -> list[str]:
-        resolver: IOutputResolver = OutputResolver()
+        resolver: IOutputResolver = self.create_resolver()
         normalized = resolver.normalize_cli_args(args)
         return super().parse_args(ctx, normalized)
 
@@ -39,11 +44,12 @@ app = typer.Typer(
 
 
 def print_presets(
-    presets: dict[str, PresetModel],
+    presets: Mapping[str, DPreset],
     reporter: IReporter | None = None,
+    create_reporter: MReporter = IReporter,
 ) -> None:
     """Display available presets and their configurations."""
-    active_reporter: IReporter = reporter or ConsoleReporter()
+    active_reporter: IReporter = reporter or create_reporter()
     active_reporter.print_presets(presets)
 
 
@@ -156,8 +162,12 @@ def package(
         typer.Option("--dry-run", help="Show resulting members without creating ZIP"),
     ] = False,
 ) -> None:
-    catalog: IPresetCatalog = PresetCatalog()
-    reporter: IReporter = ConsoleReporter()
+    create_catalog: MPresetCatalog = IPresetCatalog
+    create_reporter: MReporter = IReporter
+    create_packager: MPackager = IPackager
+
+    catalog: IPresetCatalog = create_catalog()
+    reporter: IReporter = create_reporter()
     presets = catalog.load_all()
 
     if list_presets:
@@ -221,7 +231,7 @@ def package(
         output=resolved_output,
         name=archive_name,
         preset_name=effective_preset_name,
-        rules=combined_rules,
+        rules=list(combined_rules),  # type: ignore[arg-type]
         compression=compression,
         flat=flat,
         dry_run=dry_run,
@@ -229,7 +239,7 @@ def package(
         verbose=verbose,
     )
 
-    packager: IPackager = ZipPackager(config, reporter=reporter)
+    packager: IPackager = create_packager(config, reporter=reporter)
     try:
         packager.package()
     except (FileExistsError, FileNotFoundError, ValueError) as e:

@@ -1,41 +1,68 @@
-"""Data models, class invariants (D*), and nominal interfaces (I*) for zipdir."""
+"""Concrete data models and pure domain value helpers implementing D* contracts."""
 
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from zipdir.interfaces import (
+    DEvaluationResult,
+    DEvaluationState,
+    DIgnoreRule,
+    DPackagerConfig,
+    DParsedRule,
+    DPreset,
+    DRemapContext,
+    DResolvedOutput,
+    DScopedRule,
+    DSqueezeBuffer,
+    RuleKind,
+)
 
-class RuleKind(Enum):
-    """Classification of rule types in .zipignore, directly indexed by count of '!' marks."""
+CANONICAL_TARGETS: dict[str, str] = {
+    "": "",
+    ".": "./",
+    "./": "./",
+    "..": "../",
+    "../": "../",
+    "/": "/",
+}
 
-    EXCLUDE = 0
-    RESCUE = 1
-    REDELETE = 2
+
+def normalize_target(target: str) -> str:
+    """Normalize a rescue/redelete destination target into canonical form."""
+    stripped = target.strip()
+    if stripped in CANONICAL_TARGETS:
+        return CANONICAL_TARGETS[stripped]
+    return stripped.rstrip("/")
 
 
-# ==============================================================================
-# Data Contracts & Class Invariants (D*)
-# ==============================================================================
-class DParsedRule:
-    """Data contract and invariant for an interpreted .zipignore AST node.
+def redelete_matches_rescue(redelete_target: str, rescued_target: str | None) -> bool:
+    """Check whether a REDELETE target cancels a given RESCUE target."""
+    if rescued_target is None:
+        return True
+    return normalize_target(redelete_target) == normalize_target(rescued_target)
 
-    Invariants:
-    - `pattern` is a non-empty string (`len(pattern) > 0`).
-    - `target` never contains legacy `'?'` prefix characters (`'?' not in target`).
-    """
 
-    kind: RuleKind
-    target: str
-    pattern: str
+def normalize_posix_path(path: PurePosixPath) -> PurePosixPath:
+    """Resolve '.' and '..' segments within a relative PurePosixPath."""
+    stack: list[str] = []
+    for part in path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if stack:
+                stack.pop()
+        else:
+            stack.append(part)
+    return PurePosixPath(*stack) if stack else PurePosixPath()
 
 
 @dataclass(frozen=True)
 class ParsedRule(DParsedRule):
-    """Intermediary AST representation for an interpreted .zipignore rule."""
+    """Concrete AST representation for an interpreted .zipignore rule."""
 
     kind: RuleKind
     target: str
@@ -48,24 +75,9 @@ class ParsedRule(DParsedRule):
             raise ValueError("ParsedRule invariant violated: '?' is prohibited in target")
 
 
-class DIgnoreRule(DParsedRule):
-    """Data contract and invariant for a compiled .zipignore rule.
-
-    Invariants:
-    - Preserves `DParsedRule` invariants (`pattern != ""`, `'?' not in target`).
-    - `scope` is a relative `PurePosixPath` (`not scope.is_absolute()`).
-    """
-
-    raw: str
-    regex: re.Pattern[str]
-    is_dir_only: bool
-    has_slash: bool
-    scope: PurePosixPath
-
-
 @dataclass(frozen=True)
 class IgnoreRule(DIgnoreRule):
-    """Represents a compiled .zipignore pattern with optional rescue / remapping target."""
+    """Concrete compiled .zipignore rule with optional rescue / remapping target."""
 
     raw: str
     kind: RuleKind
@@ -85,26 +97,9 @@ class IgnoreRule(DIgnoreRule):
             raise ValueError("IgnoreRule invariant violated: scope must be a relative path")
 
 
-class DEvaluationResult:
-    """Data contract and invariant for path evaluation outcomes.
-
-    Invariants:
-    - `(is_excluded is True and arc_path is None)` or
-      `(is_excluded is False and arc_path is not None)`.
-    """
-
-    is_excluded: bool
-    arc_path: PurePosixPath | None
-    matched_rule: IgnoreRule | None
-
-
 @dataclass(frozen=True)
 class EvaluationResult(DEvaluationResult):
-    """Outcome of evaluating a path against a compiled rule set.
-
-    Supports both named attribute access and 3-tuple unpacking:
-    `is_excluded, arc_path, matched_rule = evaluator.evaluate(path, is_dir)`
-    """
+    """Concrete outcome of evaluating a path against a compiled rule set."""
 
     is_excluded: bool
     arc_path: PurePosixPath | None
@@ -126,23 +121,9 @@ class EvaluationResult(DEvaluationResult):
         yield self.matched_rule
 
 
-class DResolvedOutput:
-    """Data contract and invariant for resolved archive output paths.
-
-    Invariants:
-    - `explicit_zip is True` implies `fell_back is False`.
-    - `stem` is a non-empty archive stem string.
-    """
-
-    path: Path
-    explicit_zip: bool
-    stem: str
-    fell_back: bool
-
-
 @dataclass(frozen=True)
 class ResolvedOutput(DResolvedOutput):
-    """Resolved archive output path and collision metadata."""
+    """Concrete resolved archive output path and collision metadata."""
 
     path: Path
     explicit_zip: bool
@@ -156,32 +137,15 @@ class ResolvedOutput(DResolvedOutput):
             )
 
 
-class DScopedRule:
-    """Data contract and invariant for a directory-scoped rule line."""
-
-    scope: PurePosixPath
-    rule: str
-
-
 class ScopedRule(BaseModel, DScopedRule):
-    """A rule line paired with its directory scope (relative to packaging source)."""
+    """Concrete rule line paired with its directory scope (relative to packaging source)."""
 
     scope: PurePosixPath = Field(default_factory=PurePosixPath)
     rule: str
 
 
-class DPreset:
-    """Data contract and invariant for preset definitions."""
-
-    name: str
-    description: str
-    rules: list[str]
-    extends: list[str]
-    source_path: Path | None
-
-
 class PresetModel(BaseModel, DPreset):
-    """Pydantic schema for preset definitions."""
+    """Concrete Pydantic schema for preset definitions."""
 
     name: str = ""
     description: str = ""
@@ -190,28 +154,8 @@ class PresetModel(BaseModel, DPreset):
     source_path: Path | None = None
 
 
-class DPackagerConfig:
-    """Data contract and invariant for directory packaging configuration.
-
-    Invariants:
-    - `compression` is within `0..9`.
-    - `name` is a non-empty single directory name.
-    """
-
-    source: Path
-    output: Path
-    name: str
-    preset_name: str
-    rules: list[str | ScopedRule | IgnoreRule]
-    compression: int
-    flat: bool
-    dry_run: bool
-    force: bool
-    verbose: bool
-
-
 class PackagerConfig(BaseModel, DPackagerConfig):
-    """Configuration options for directory packaging."""
+    """Concrete configuration options for directory packaging."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -227,191 +171,40 @@ class PackagerConfig(BaseModel, DPackagerConfig):
     verbose: bool = False
 
 
-# ==============================================================================
-# Horizontally Separated Behavioral Interfaces (I* / D*) — DIP & ISP
-# ==============================================================================
-class DGlobCompiler:
-    """State invariant for gitignore glob compilers."""
+class SqueezeBuffer[T](DSqueezeBuffer[T]):
+    """Concrete mutable buffer state for compile-time rule squeezing."""
 
-    token_pattern: re.Pattern[str]
+    items: list[T]
+    parsed_meta: list[DParsedRule]
+    seen: dict[tuple[PurePosixPath, str], list[int]]
 
+    def __init__(self) -> None:
+        self.items = []
+        self.parsed_meta = []
+        self.seen = {}
 
-class IGlobCompiler(DGlobCompiler):
-    """Nominal interface for compiling gitignore-style glob patterns into regular expressions."""
-
-    def interpret(self, pattern: str) -> tuple[re.Pattern[str], bool, bool]:
-        raise NotImplementedError
-
-
-class DRuleInterpreter:
-    """State invariant for 4-component .zipignore rule interpreters."""
-
-    glob_compiler: IGlobCompiler
+    def shift_indices(self, removed_idx: int) -> None:
+        """Adjust recorded index positions after an element removal."""
+        for key, idx_list in self.seen.items():
+            self.seen[key] = [i - 1 if i > removed_idx else i for i in idx_list if i != removed_idx]
 
 
-class IRuleInterpreter(DRuleInterpreter):
-    """Nominal interface for parsing and compiling .zipignore rules."""
+@dataclass
+class EvaluationState(DEvaluationState):
+    """Concrete mutable state tracking exclusion, rescue, and shallowest excluded ancestor."""
 
-    def parse_components(self, line: str) -> ParsedRule | None:
-        raise NotImplementedError
-
-    def interpret(self, line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
-        raise NotImplementedError
-
-    def compile_all(
-        self, rules: Sequence[str | ScopedRule | IgnoreRule]
-    ) -> tuple[IgnoreRule, ...]:
-        raise NotImplementedError
+    is_excluded: bool = False
+    shallowest_excluded_ancestor: PurePosixPath | None = None
+    excluded_by: IgnoreRule | None = None
+    rescued_by: IgnoreRule | None = None
 
 
-class IRuleSqueezer(IRuleInterpreter):
-    """Extended nominal interface supporting target-aware compile-time rule squeezing."""
+@dataclass(frozen=True)
+class RemapContext(DRemapContext):
+    """Concrete coordinate parameters passed to IRemapStrategy implementations."""
 
-    def squeeze(self, rules: Sequence[str | ScopedRule]) -> list[str | ScopedRule]:
-        raise NotImplementedError
-
-
-class DPathEvaluator:
-    """State invariant for runtime path evaluators."""
-
-    rules: tuple[IgnoreRule, ...]
-
-
-class IPathEvaluator(DPathEvaluator):
-    """Nominal interface for evaluating relative paths and pruning directories."""
-
-    def evaluate(self, rel_path: PurePosixPath, is_dir: bool = False) -> EvaluationResult:
-        raise NotImplementedError
-
-    def should_prune(self, rel_dir: PurePosixPath) -> bool:
-        raise NotImplementedError
-
-
-class DOutputResolver:
-    """State invariant for output path resolvers."""
-
-    cwd: Path
-    timestamp_fn: Callable[[], str]
-
-
-class IOutputResolver(DOutputResolver):
-    """Nominal interface for 3-tier output path resolution and collision fallback."""
-
-    def normalize_cli_args(self, args: Sequence[str]) -> list[str]:
-        raise NotImplementedError
-
-    def resolve_with_metadata(
-        self,
-        source: Path,
-        name: str,
-        output_target: str | Path | None = None,
-        *,
-        timestamp: bool = False,
-        force: bool = False,
-    ) -> ResolvedOutput:
-        raise NotImplementedError
-
-    def resolve(
-        self,
-        source: Path,
-        name: str,
-        output_target: str | Path | None = None,
-        *,
-        timestamp: bool = False,
-        force: bool = False,
-    ) -> Path:
-        raise NotImplementedError
-
-
-class DPresetCatalog:
-    """State invariant for preset discovery and C3 cascade resolution."""
-
-    preset_dirs: list[Path]
-    interpreter: IRuleSqueezer
-
-
-class IPresetCatalog(DPresetCatalog):
-    """Nominal interface for preset loading, C3 linearization, and 4-tier cascading."""
-
-    def parse_file(self, file: Path) -> PresetModel:
-        raise NotImplementedError
-
-    def load_all(self) -> dict[str, PresetModel]:
-        raise NotImplementedError
-
-    def linearize_presets(
-        self,
-        name: str,
-        raw_presets: Mapping[str, PresetModel],
-    ) -> list[str]:
-        raise NotImplementedError
-
-    def discover_sub_zipignores(self, source: Path) -> list[tuple[PurePosixPath, Path]]:
-        raise NotImplementedError
-
-    def resolve_cascade(
-        self,
-        source: Path,
-        presets: dict[str, PresetModel] | None = None,
-        *,
-        preset: str | None = None,
-        cli_rules: Sequence[str] = (),
-        no_default_rules: bool = False,
-    ) -> tuple[str, list[str | ScopedRule]]:
-        raise NotImplementedError
-
-
-class DReporter:
-    """State invariant for terminal/UI reporters."""
-
-    use_color: bool
-
-
-class IReporter(DReporter):
-    """Nominal interface for reporting preset listings, dry-run previews, and summaries."""
-
-    def print_presets(self, presets: Mapping[str, PresetModel]) -> None:
-        raise NotImplementedError
-
-    def print_dry_run(
-        self,
-        config: PackagerConfig,
-        entries: Sequence[tuple[Path, str]],
-        rescued_files: Sequence[tuple[str, str]],
-        excluded_files: Sequence[str],
-    ) -> None:
-        raise NotImplementedError
-
-    def print_summary(
-        self,
-        config: PackagerConfig,
-        output: Path,
-        entries: Sequence[tuple[Path, str]],
-        rescued_files: Sequence[tuple[str, str]],
-        excluded_files: Sequence[str],
-    ) -> None:
-        raise NotImplementedError
-
-
-class DPackager:
-    """State invariant for archive packagers."""
-
-    config: PackagerConfig
-    evaluator: IPathEvaluator
-    reporter: IReporter
-    compiled_rules: list[IgnoreRule]
-    rescued_files: list[tuple[str, str]]
-    excluded_files: list[str]
-
-
-class IPackager(DPackager):
-    """Nominal interface for traversing sources and producing ZIP archives."""
-
-    def collect_members(self) -> Iterator[tuple[Path, str]]:
-        raise NotImplementedError
-
-    def write_archive(self, path: Path, entries: Sequence[tuple[Path, str]]) -> None:
-        raise NotImplementedError
-
-    def package(self) -> Path:
-        raise NotImplementedError
+    rel_path: PurePosixPath
+    rescued_by: IgnoreRule
+    shallowest_excluded_ancestor: PurePosixPath | None
+    sub_path: PurePosixPath
+    anchor_parent: PurePosixPath

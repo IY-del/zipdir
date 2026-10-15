@@ -1,4 +1,4 @@
-"""Core packaging engine (direct-to-archive writer with non-greedy pruning and Strategy/Bridge)."""
+"""Concrete packaging engine implementing IPackager and IArchiveEntryWriter strategies."""
 
 import os
 import stat
@@ -7,30 +7,22 @@ import zipfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.evaluator import PathEvaluator
-from zipdir.models import (
-    IgnoreRule,
+from zipdir.interfaces import (
+    DIgnoreRule,
+    DPackagerConfig,
+    IArchiveEntryWriter,
     IPackager,
     IPathEvaluator,
     IReporter,
-    PackagerConfig,
+    MPathEvaluator,
+    MReporter,
     RuleKind,
 )
-from zipdir.ui import ConsoleReporter
-
-
-class IArchiveEntryWriter:
-    """Nominal Strategy interface for writing an entry into a ZipFile archive."""
-
-    def matches(self, item: Path, source: Path) -> bool:
-        raise NotImplementedError
-
-    def write(self, archive: zipfile.ZipFile, item: Path, arcname: str) -> None:
-        raise NotImplementedError
+from zipdir.models import IgnoreRule, PackagerConfig
 
 
 class RootDirArchiveWriter(IArchiveEntryWriter):
-    """Strategy for writing the enclosing top-level root directory entry."""
+    """Concrete Strategy for writing the enclosing top-level root directory entry."""
 
     def matches(self, item: Path, source: Path) -> bool:
         return item == source
@@ -41,7 +33,7 @@ class RootDirArchiveWriter(IArchiveEntryWriter):
 
 
 class SymlinkArchiveWriter(IArchiveEntryWriter):
-    """Strategy for preserving symbolic links inside the ZIP archive."""
+    """Concrete Strategy for preserving symbolic links inside the ZIP archive."""
 
     def matches(self, item: Path, source: Path) -> bool:
         return item != source and item.is_symlink()
@@ -54,7 +46,7 @@ class SymlinkArchiveWriter(IArchiveEntryWriter):
 
 
 class RegularFileArchiveWriter(IArchiveEntryWriter):
-    """Default fallback Strategy for writing regular files into the ZIP archive."""
+    """Concrete fallback Strategy for writing regular files into the ZIP archive."""
 
     def matches(self, item: Path, source: Path) -> bool:
         return True
@@ -71,13 +63,13 @@ DEFAULT_ENTRY_WRITERS: tuple[IArchiveEntryWriter, ...] = (
 
 
 class ZipPackager(IPackager):
-    """Traverses source directory using IPathEvaluator and writes ZIP archives atomically."""
+    """Concrete packager traversing source via IPathEvaluator and writing ZIP archives atomically."""
 
-    config: PackagerConfig
+    config: DPackagerConfig
     evaluator: IPathEvaluator
     reporter: IReporter
     entry_writers: Sequence[IArchiveEntryWriter]
-    compiled_rules: list[IgnoreRule]
+    compiled_rules: list[DIgnoreRule]
     rescued_files: list[tuple[str, str]]
     excluded_files: list[str]
 
@@ -87,14 +79,30 @@ class ZipPackager(IPackager):
         evaluator: IPathEvaluator | None = None,
         reporter: IReporter | None = None,
         entry_writers: Sequence[IArchiveEntryWriter] | None = None,
+        create_evaluator: MPathEvaluator = IPathEvaluator,
+        create_reporter: MReporter = IReporter,
     ) -> None:
         self.config = config
-        self.evaluator = evaluator or PathEvaluator(config.rules)
-        self.reporter = reporter or ConsoleReporter()
+        self.evaluator = evaluator or create_evaluator(config.rules)
+        self.reporter = reporter or create_reporter()
         self.entry_writers = (
             entry_writers if entry_writers is not None else DEFAULT_ENTRY_WRITERS
         )
-        self.compiled_rules = list(self.evaluator.rules)
+        self.compiled_rules = [
+            r
+            if isinstance(r, IgnoreRule)
+            else IgnoreRule(
+                raw=r.raw,
+                kind=r.kind,
+                target=r.target,
+                pattern=r.pattern,
+                regex=r.regex,
+                is_dir_only=r.is_dir_only,
+                has_slash=r.has_slash,
+                scope=r.scope,
+            )
+            for r in self.evaluator.rules
+        ]
         self.rescued_files = []
         self.excluded_files = []
 
@@ -114,11 +122,7 @@ class ZipPackager(IPackager):
         return False
 
     def collect_members(self) -> Iterator[tuple[Path, str]]:
-        """Traverse source directory and yield (filesystem_path, arcname) pairs.
-
-        Performs member-level phagocytosis when multiple source files map to the same
-        archive path (`arcname`), allowing later/rescued entries to replace earlier ones.
-        """
+        """Traverse source directory and yield (filesystem_path, arcname) pairs."""
         prefix = PurePosixPath() if self.config.flat else PurePosixPath(self.config.name)
         staged_entries: list[tuple[Path, str]] = []
         seen_arcnames: dict[str, int] = {}

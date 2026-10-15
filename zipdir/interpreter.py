@@ -1,17 +1,23 @@
-"""4-component pattern matching and base rule compilation."""
+"""Concrete 4-component pattern matching and base rule compiler implementing IRuleInterpreter."""
 
 import re
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from zipdir.glob import GlobExpression
-from zipdir.models import (
+from zipdir.interfaces import (
+    DIgnoreRule,
+    DParsedRule,
+    DScopedRule,
     IGlobCompiler,
-    IgnoreRule,
     IRuleInterpreter,
-    ParsedRule,
+    MGlobCompiler,
     RuleKind,
-    ScopedRule,
+)
+from zipdir.models import (
+    IgnoreRule,
+    ParsedRule,
+    normalize_target,
+    redelete_matches_rescue,
 )
 
 # 4 components of rule syntax: [b1]{to}![pattern]
@@ -21,52 +27,21 @@ from zipdir.models import (
 # 4. pattern: glob pattern ({pattern})
 RULE_COMPONENT_PATTERN = re.compile(r"^(?P<b1>!?)(?P<to>[^!]*)!(?P<pattern>.+)$")
 
-CANONICAL_TARGETS: dict[str, str] = {
-    "": "",
-    ".": "./",
-    "./": "./",
-    "..": "../",
-    "../": "../",
-    "/": "/",
-}
-
-
-def normalize_target(target: str) -> str:
-    """Normalize a rescue/redelete destination target into canonical form."""
-    stripped = target.strip()
-    if stripped in CANONICAL_TARGETS:
-        return CANONICAL_TARGETS[stripped]
-    return stripped.rstrip("/")
-
-
-def redelete_matches_rescue(redelete_target: str, rescued_target: str | None) -> bool:
-    """Check whether a REDELETE target cancels a given RESCUE target."""
-    if rescued_target is None:
-        return True
-    return normalize_target(redelete_target) == normalize_target(rescued_target)
-
 
 class RuleInterpreter(IRuleInterpreter):
-    """Base interpreter that parses 4-component syntax and compiles .zipignore rules."""
+    """Concrete base interpreter that parses 4-component syntax and compiles .zipignore rules."""
 
     glob_compiler: IGlobCompiler
 
-    def __init__(self, glob_compiler: IGlobCompiler | None = None) -> None:
-        self.glob_compiler = glob_compiler or GlobExpression()
+    def __init__(
+        self,
+        glob_compiler: IGlobCompiler | None = None,
+        create_glob: MGlobCompiler = IGlobCompiler,
+    ) -> None:
+        self.glob_compiler = glob_compiler or create_glob()
 
     def parse_components(self, line: str) -> ParsedRule | None:
-        """Parse raw line into 4-component AST node (ParsedRule).
-
-        3-tier destination prefix rules for `{to}` in `[!]{to}!{pattern}`:
-        - `/` (`/!`, `/{to}!`): Archive root
-        - `./` or `../` (`./!`, `./{to}!`, `../!`): Original source / local scope hierarchy
-        - omitted (`!`, `{to}!`): Exile destination (shallowest excluded ancestor's parent)
-
-        Strict notation rules:
-        - 0 bangs: EXCLUDE (`{pattern}`)
-        - 1 bang:  RESCUE (`{to}!{pattern}`, `./!{pattern}`, `!{pattern}`)
-        - 2 bangs: REDELETE (`!{to}!{pattern}`, `!./!{pattern}`, `!!{pattern}`)
-        """
+        """Parse raw line into 4-component AST node (ParsedRule)."""
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             return None
@@ -93,20 +68,35 @@ class RuleInterpreter(IRuleInterpreter):
             return None
         return self._build_rule(line, parsed, scope)
 
-    def compile_all(self, rules: Sequence[str | ScopedRule | IgnoreRule]) -> tuple[IgnoreRule, ...]:
+    def compile_all(
+        self, rules: Sequence[str | DScopedRule | DIgnoreRule]
+    ) -> tuple[IgnoreRule, ...]:
         """Compile a sequence of raw or scoped rules into IgnoreRule objects."""
         compiled: list[IgnoreRule] = []
         for item in rules:
             if isinstance(item, IgnoreRule):
                 compiled.append(item)
-            elif isinstance(item, ScopedRule):
+            elif isinstance(item, DIgnoreRule):
+                compiled.append(
+                    IgnoreRule(
+                        raw=item.raw,
+                        kind=item.kind,
+                        target=item.target,
+                        pattern=item.pattern,
+                        regex=item.regex,
+                        is_dir_only=item.is_dir_only,
+                        has_slash=item.has_slash,
+                        scope=item.scope,
+                    )
+                )
+            elif isinstance(item, DScopedRule):
                 if (r := self.interpret(item.rule, scope=item.scope)) is not None:
                     compiled.append(r)
             elif (r := self.interpret(item)) is not None:
                 compiled.append(r)
         return tuple(compiled)
 
-    def _build_rule(self, raw: str, parsed: ParsedRule, scope: PurePosixPath) -> IgnoreRule:
+    def _build_rule(self, raw: str, parsed: DParsedRule, scope: PurePosixPath) -> IgnoreRule:
         regex, is_dir_only, has_slash = self.glob_compiler.interpret(parsed.pattern)
         return IgnoreRule(
             raw=raw,
@@ -123,3 +113,12 @@ class RuleInterpreter(IRuleInterpreter):
 def compile_rule(line: str, scope: PurePosixPath = PurePosixPath()) -> IgnoreRule | None:
     """Compile a single .zipignore rule line into an IgnoreRule."""
     return RuleInterpreter().interpret(line, scope=scope)
+
+
+__all__ = [
+    "RULE_COMPONENT_PATTERN",
+    "RuleInterpreter",
+    "compile_rule",
+    "normalize_target",
+    "redelete_matches_rescue",
+]

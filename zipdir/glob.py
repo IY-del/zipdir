@@ -1,9 +1,9 @@
-"""Glob pattern compilation for gitignore-style patterns using token translation strategies."""
+"""Concrete glob pattern compiler implementing IGlobCompiler via token translation strategies."""
 
 import re
 from collections.abc import Callable, Mapping
 
-from zipdir.models import IGlobCompiler
+from zipdir.interfaces import IGlobCompiler
 
 # Gitignore glob tokens in priority order:
 # 1. '/**/' or '**/' -> directory recursive wildcard
@@ -49,7 +49,7 @@ DEFAULT_TOKEN_TRANSLATORS: dict[str, Callable[[str], str]] = {
 
 
 class GlobExpression(IGlobCompiler):
-    """Interprets gitignore-style glob pattern into a compiled regex and metadata."""
+    """Concrete gitignore-style glob compiler into regex and structural metadata."""
 
     token_pattern: re.Pattern[str]
     translators: Mapping[str, Callable[[str], str]]
