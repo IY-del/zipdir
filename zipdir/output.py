@@ -1,47 +1,90 @@
-"""Output path resolution with 3-tier prefix semantics and timestamp collision fallback."""
+"""Output path resolution with 3-tier prefix Strategy and timestamp collision fallback."""
 
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
-
-@dataclass(frozen=True)
-class ResolvedOutput:
-    """Resolved archive output path and collision metadata."""
-
-    path: Path
-    explicit_zip: bool
-    stem: str
-    fell_back: bool = False
+from zipdir.models import IOutputResolver, ResolvedOutput
 
 
-class OutputResolver:
-    """Resolves archive output paths according to 3-tier prefix rules and collision fallback.
+class IOutputTargetStrategy:
+    """Nominal Strategy interface for classifying 3-tier raw output path prefixes."""
 
-    Prefix conventions for `-o` / `output_target`:
-    - `None` (omitted): Current working directory (`./<name>.zip`)
-    - `""` (bare `-o`): Source parent directory (`<source.parent>/<name>.zip`)
-    - `"/..."` or `"~/..."`: Absolute path
-    - `"./..."` or `"../..."` (or `"."`, `".."`): Current working directory relative path
-    - `"___"` or `"___/..."`: Source parent relative path
+    def matches(self, raw: str) -> bool:
+        raise NotImplementedError
 
-    Collision fallback:
-    - When an explicit `.zip` filename is given (`-o foo.zip`), the filename is locked (no `-t` fallback).
-    - When omitted or specifying a directory / stem without `.zip`, if `<stem>.zip` already exists and
-      `force=False`, automatically falls back to `<stem>_<YYYYMMDD_HHMMSS>.zip`.
-    """
+    def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
+        raise NotImplementedError
+
+
+class BareParentOutputStrategy(IOutputTargetStrategy):
+    """Matches bare `-o` (`""`): resolves to `<source.parent>/` directory."""
+
+    def matches(self, raw: str) -> bool:
+        return raw == ""
+
+    def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
+        return source.parent, True
+
+
+class AbsoluteOutputStrategy(IOutputTargetStrategy):
+    """Matches `/...` or `~` / `~/...`: resolves as an absolute filesystem path."""
+
+    def matches(self, raw: str) -> bool:
+        return raw.startswith("/") or raw == "~" or raw.startswith("~/")
+
+    def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
+        return Path(raw).expanduser(), raw.endswith("/")
+
+
+class CwdRelativeOutputStrategy(IOutputTargetStrategy):
+    """Matches `.`, `..`, `./...`, or `../...`: resolves relative to current working directory."""
+
+    def matches(self, raw: str) -> bool:
+        return raw in (".", "..") or raw.startswith("./") or raw.startswith("../")
+
+    def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
+        return cwd / raw, raw in (".", "..") or raw.endswith("/")
+
+
+class ParentRelativeOutputStrategy(IOutputTargetStrategy):
+    """Default fallback strategy (`___` without prefix): resolves relative to `<source.parent>`."""
+
+    def matches(self, raw: str) -> bool:
+        return True
+
+    def classify(self, source: Path, cwd: Path, raw: str) -> tuple[Path, bool]:
+        return source.parent / raw, raw.endswith("/")
+
+
+DEFAULT_OUTPUT_TARGET_STRATEGIES: tuple[IOutputTargetStrategy, ...] = (
+    BareParentOutputStrategy(),
+    AbsoluteOutputStrategy(),
+    CwdRelativeOutputStrategy(),
+    ParentRelativeOutputStrategy(),
+)
+
+
+class OutputResolver(IOutputResolver):
+    """Resolves archive output paths according to 3-tier prefix rules and collision fallback."""
 
     cwd: Path
     timestamp_fn: Callable[[], str]
+    target_strategies: Sequence[IOutputTargetStrategy]
 
     def __init__(
         self,
         cwd: Path | None = None,
         timestamp_fn: Callable[[], str] | None = None,
+        target_strategies: Sequence[IOutputTargetStrategy] | None = None,
     ) -> None:
         self.cwd = cwd if cwd is not None else Path.cwd()
         self.timestamp_fn = timestamp_fn or (lambda: time.strftime("%Y%m%d_%H%M%S"))
+        self.target_strategies = (
+            target_strategies
+            if target_strategies is not None
+            else DEFAULT_OUTPUT_TARGET_STRATEGIES
+        )
 
     def normalize_cli_args(self, args: Sequence[str]) -> list[str]:
         """Normalize CLI arguments so bare `-o` / `--output` defaults to `""` (source.parent)."""
@@ -124,13 +167,10 @@ class OutputResolver:
         ).path
 
     def _classify_target(self, source: Path, raw: str) -> tuple[Path, bool]:
-        """Classify raw output string into (target_path, is_forced_dir) across 3 prefix tiers."""
-        if raw == "":
-            return source.parent, True
-        if raw.startswith("/") or raw == "~" or raw.startswith("~/"):
-            return Path(raw).expanduser(), raw.endswith("/")
-        if raw in (".", "..") or raw.startswith("./") or raw.startswith("../"):
-            return self.cwd / raw, raw in (".", "..") or raw.endswith("/")
+        """Classify raw output string into (target_path, is_forced_dir) via Strategy chain."""
+        for strategy in self.target_strategies:
+            if strategy.matches(raw):
+                return strategy.classify(source, self.cwd, raw)
         return source.parent / raw, raw.endswith("/")
 
     def _build_dynamic_output(

@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from zipdir.models import PresetModel, ScopedRule
+from zipdir.models import IPresetCatalog, IRuleSqueezer, PresetModel, ScopedRule
 from zipdir.squeezer import RuleInterpreter
 
 DEFAULT_PRESET_DIRS: list[Path] = [
@@ -16,16 +16,16 @@ DEFAULT_PRESET_DIRS: list[Path] = [
 ]
 
 
-class PresetCatalog:
+class PresetCatalog(IPresetCatalog):
     """Manages preset discovery, C3 inheritance linearization, and 4-tier .zipignore rule cascading."""
 
     preset_dirs: list[Path]
-    interpreter: RuleInterpreter
+    interpreter: IRuleSqueezer
 
     def __init__(
         self,
         preset_dirs: Sequence[Path] | None = None,
-        interpreter: RuleInterpreter | None = None,
+        interpreter: IRuleSqueezer | None = None,
     ) -> None:
         dirs = list(preset_dirs) if preset_dirs is not None else list(DEFAULT_PRESET_DIRS)
         if "ZIPDIR_PRESETS_DIR" in os.environ:
@@ -310,36 +310,14 @@ class PresetCatalog:
 
         base_rules: list[str] = []
         if not no_default_rules:
-            if preset is not None:
-                preset_path = Path(preset).expanduser()
-                if preset not in loaded_presets and preset_path.is_file():
-                    custom_model = self.parse_file(preset_path)
-                    base_rules.extend(
-                        self._resolve_extended_rules(
-                            custom_model.extends,
-                            preset_path.parent,
-                            loaded_presets,
-                            preset_path,
-                        )
-                    )
-                    base_rules.extend(custom_model.rules)
-                    effective_preset_name = custom_model.name or preset_path.name
-                elif preset in loaded_presets:
-                    base_rules.extend(loaded_presets[preset].rules)
-                else:
-                    available = ", ".join(loaded_presets.keys())
-                    raise ValueError(f"Unknown preset '{preset}'. Available: {available}")
-            elif local_extends:
-                base_rules.extend(
-                    self._resolve_extended_rules(
-                        local_extends,
-                        source,
-                        loaded_presets,
-                        local_zipignore if local_zipignore.is_file() else None,
-                    )
-                )
-            elif "clean" in loaded_presets:
-                base_rules.extend(loaded_presets["clean"].rules)
+            base_rules, effective_preset_name = self._resolve_tier1_base(
+                source,
+                loaded_presets,
+                preset=preset,
+                local_extends=local_extends,
+                local_zipignore=local_zipignore,
+                effective_preset_name=effective_preset_name,
+            )
 
         tier1_rules = [ScopedRule(rule=p) for p in base_rules]
 
@@ -375,6 +353,47 @@ class PresetCatalog:
 
         combined_raw = tier1_rules + tier2_rules + tier3_rules + tier4_rules
         return effective_preset_name, self.interpreter.squeeze(combined_raw)
+
+    def _resolve_tier1_base(
+        self,
+        source: Path,
+        loaded_presets: Mapping[str, PresetModel],
+        *,
+        preset: str | None,
+        local_extends: Sequence[str],
+        local_zipignore: Path,
+        effective_preset_name: str,
+    ) -> tuple[list[str], str]:
+        """Resolve Tier-1 base rules from explicit preset flag, local extends, or default 'clean'."""
+        if preset is not None:
+            preset_path = Path(preset).expanduser()
+            if preset not in loaded_presets and preset_path.is_file():
+                custom_model = self.parse_file(preset_path)
+                extended = self._resolve_extended_rules(
+                    custom_model.extends,
+                    preset_path.parent,
+                    loaded_presets,
+                    preset_path,
+                )
+                return [*extended, *custom_model.rules], custom_model.name or preset_path.name
+            if preset in loaded_presets:
+                return list(loaded_presets[preset].rules), effective_preset_name
+            available = ", ".join(loaded_presets.keys())
+            raise ValueError(f"Unknown preset '{preset}'. Available: {available}")
+
+        if local_extends:
+            extended = self._resolve_extended_rules(
+                local_extends,
+                source,
+                loaded_presets,
+                local_zipignore if local_zipignore.is_file() else None,
+            )
+            return extended, effective_preset_name
+
+        if "clean" in loaded_presets:
+            return list(loaded_presets["clean"].rules), effective_preset_name
+
+        return [], effective_preset_name
 
 
 def load_raw_zipignore_preset(file: Path) -> PresetModel:

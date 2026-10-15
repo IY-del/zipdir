@@ -1,70 +1,300 @@
-"""Runtime path evaluation, smart remapping, and non-greedy directory pruning."""
+"""Runtime path evaluation, smart remapping via Strategy/CoR, and non-greedy directory pruning."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from zipdir.interpreter import redelete_matches_rescue
-from zipdir.models import EvaluationResult, IgnoreRule, RuleKind, ScopedRule
+from zipdir.models import (
+    EvaluationResult,
+    IgnoreRule,
+    IPathEvaluator,
+    IRuleInterpreter,
+    RuleKind,
+    ScopedRule,
+)
 from zipdir.squeezer import RuleInterpreter
 
 
+def normalize_posix_path(path: PurePosixPath) -> PurePosixPath:
+    """Resolve '.' and '..' segments within a relative PurePosixPath."""
+    stack: list[str] = []
+    for part in path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if stack:
+                stack.pop()
+        else:
+            stack.append(part)
+    return PurePosixPath(*stack) if stack else PurePosixPath()
+
+
+# ==============================================================================
+# 1. Rule Transition Strategies (State / Strategy for Hierarchical Phagocytosis)
+# ==============================================================================
+class DEvaluationState:
+    """Mutable state invariant accumulated across ancestor and target evaluation."""
+
+    is_excluded: bool
+    shallowest_excluded_ancestor: PurePosixPath | None
+    excluded_by: IgnoreRule | None
+    rescued_by: IgnoreRule | None
+
+
 @dataclass
-class _AncestorStatus:
-    """Tracks exclusion and rescue state accumulated across ancestor directories."""
+class EvaluationState(DEvaluationState):
+    """Tracks exclusion, rescue, and shallowest excluded ancestor across path evaluation."""
 
     is_excluded: bool = False
     shallowest_excluded_ancestor: PurePosixPath | None = None
-    matched_rule: IgnoreRule | None = None
-
-    def apply(self, ancestor: PurePosixPath, rule: IgnoreRule) -> None:
-        """Apply a matching ancestor rule using hierarchical phagocytosis transitions."""
-        if rule.kind == RuleKind.EXCLUDE:
-            self.is_excluded = True
-            if self.shallowest_excluded_ancestor is None:
-                self.shallowest_excluded_ancestor = ancestor
-            self.matched_rule = rule
-        elif rule.kind == RuleKind.RESCUE:
-            self.is_excluded = False
-            self.matched_rule = rule
-        elif rule.kind == RuleKind.REDELETE:
-            if (
-                self.matched_rule is None
-                or self.matched_rule.kind != RuleKind.RESCUE
-                or redelete_matches_rescue(rule.target, self.matched_rule.target)
-            ):
-                self.is_excluded = True
-                self.matched_rule = rule
+    excluded_by: IgnoreRule | None = None
+    rescued_by: IgnoreRule | None = None
 
 
-class PathEvaluator:
+class IRuleTransition:
+    """Nominal Strategy interface for applying a matched IgnoreRule to EvaluationState."""
+
+    def apply(
+        self,
+        state: EvaluationState,
+        rule: IgnoreRule,
+        ancestor: PurePosixPath | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+
+class ExcludeTransition(IRuleTransition):
+    """Transition for EXCLUDE rules: marks state excluded and records shallowest ancestor."""
+
+    def apply(
+        self,
+        state: EvaluationState,
+        rule: IgnoreRule,
+        ancestor: PurePosixPath | None = None,
+    ) -> None:
+        state.is_excluded = True
+        state.excluded_by = rule
+        state.rescued_by = None
+        if ancestor is not None and state.shallowest_excluded_ancestor is None:
+            state.shallowest_excluded_ancestor = ancestor
+
+
+class RescueTransition(IRuleTransition):
+    """Transition for RESCUE rules: marks state included and records active rescue rule."""
+
+    def apply(
+        self,
+        state: EvaluationState,
+        rule: IgnoreRule,
+        ancestor: PurePosixPath | None = None,
+    ) -> None:
+        state.is_excluded = False
+        state.rescued_by = rule
+        state.excluded_by = None
+
+
+class RedeleteTransition(IRuleTransition):
+    """Transition for REDELETE rules: cancels prior rescue only when destination target matches."""
+
+    def apply(
+        self,
+        state: EvaluationState,
+        rule: IgnoreRule,
+        ancestor: PurePosixPath | None = None,
+    ) -> None:
+        rescued_target = state.rescued_by.target if state.rescued_by is not None else None
+        if state.rescued_by is None or redelete_matches_rescue(rule.target, rescued_target):
+            state.is_excluded = True
+            state.excluded_by = rule
+            state.rescued_by = None
+
+
+DEFAULT_RULE_TRANSITIONS: dict[RuleKind, IRuleTransition] = {
+    RuleKind.EXCLUDE: ExcludeTransition(),
+    RuleKind.RESCUE: RescueTransition(),
+    RuleKind.REDELETE: RedeleteTransition(),
+}
+
+
+# ==============================================================================
+# 2. 3-Tier Path Remapping Strategies (Strategy & Chain of Responsibility)
+# ==============================================================================
+class DRemapContext:
+    """Data contract and invariant for path remapping context."""
+
+    rel_path: PurePosixPath
+    rescued_by: IgnoreRule
+    shallowest_excluded_ancestor: PurePosixPath | None
+    sub_path: PurePosixPath
+    anchor_parent: PurePosixPath
+
+
+@dataclass(frozen=True)
+class RemapContext(DRemapContext):
+    """Resolved coordinate parameters passed to IRemapStrategy implementations."""
+
+    rel_path: PurePosixPath
+    rescued_by: IgnoreRule
+    shallowest_excluded_ancestor: PurePosixPath | None
+    sub_path: PurePosixPath
+    anchor_parent: PurePosixPath
+
+
+class IRemapStrategy:
+    """Nominal Strategy interface for resolving destination archive paths."""
+
+    def matches(self, target: str) -> bool:
+        raise NotImplementedError
+
+    def remap(self, ctx: RemapContext) -> PurePosixPath:
+        raise NotImplementedError
+
+    def _combine(self, dest_dir: PurePosixPath, sub_path: PurePosixPath) -> PurePosixPath:
+        clean_dir = PurePosixPath() if dest_dir == PurePosixPath(".") else dest_dir
+        return clean_dir / sub_path if clean_dir != PurePosixPath() else sub_path
+
+
+class PreserveHierarchyRemapStrategy(IRemapStrategy):
+    """Matches '.' or './': preserves original relative path from archive root."""
+
+    def matches(self, target: str) -> bool:
+        return target in (".", "./")
+
+    def remap(self, ctx: RemapContext) -> PurePosixPath:
+        return ctx.rel_path
+
+
+class ArchiveRootRemapStrategy(IRemapStrategy):
+    """Matches '/...': places rescued item relative to the archive root."""
+
+    def matches(self, target: str) -> bool:
+        return target.startswith("/")
+
+    def remap(self, ctx: RemapContext) -> PurePosixPath:
+        dest_dir = normalize_posix_path(PurePosixPath(ctx.rescued_by.target.lstrip("/")))
+        return self._combine(dest_dir, ctx.sub_path)
+
+
+class LocalScopeRemapStrategy(IRemapStrategy):
+    """Matches './{to}': places rescued item relative to local scope or preserved ancestor."""
+
+    def matches(self, target: str) -> bool:
+        return target.startswith("./") and target not in (".", "./")
+
+    def remap(self, ctx: RemapContext) -> PurePosixPath:
+        rel_sub = ctx.rescued_by.target.removeprefix("./").strip("/")
+        scope = ctx.rescued_by.scope
+        preserved_base = (
+            scope
+            if scope != PurePosixPath()
+            else (
+                ctx.shallowest_excluded_ancestor
+                if ctx.shallowest_excluded_ancestor is not None
+                else ctx.rel_path.parent
+            )
+        )
+        raw_dest = preserved_base / rel_sub if rel_sub else preserved_base
+        return self._combine(normalize_posix_path(raw_dest), ctx.sub_path)
+
+
+class ParentClimbRemapStrategy(IRemapStrategy):
+    """Matches '..' or '../...': climbs N parent levels from anchor_parent."""
+
+    def matches(self, target: str) -> bool:
+        return target in ("..", "../") or target.startswith("../")
+
+    def remap(self, ctx: RemapContext) -> PurePosixPath:
+        current = (
+            PurePosixPath() if ctx.anchor_parent == PurePosixPath(".") else ctx.anchor_parent
+        )
+        parts = [p for p in ctx.rescued_by.target.split("/") if p and p != "."]
+        idx = 0
+        while idx < len(parts) and parts[idx] == "..":
+            current = (
+                PurePosixPath()
+                if current in (PurePosixPath(), PurePosixPath("."))
+                else current.parent
+            )
+            idx += 1
+        remainder = PurePosixPath(*parts[idx:]) if idx < len(parts) else PurePosixPath()
+        combined = current / remainder if remainder != PurePosixPath() else current
+        return self._combine(normalize_posix_path(combined), ctx.sub_path)
+
+
+class ExileRemapStrategy(IRemapStrategy):
+    """Default fallback strategy (omitted prefix '!' or '{to}!'): exiles to shallowest excluded parent."""
+
+    def matches(self, target: str) -> bool:
+        return True
+
+    def remap(self, ctx: RemapContext) -> PurePosixPath:
+        target = ctx.rescued_by.target
+        has_ancestor = ctx.shallowest_excluded_ancestor is not None
+        if not has_ancestor and not target and ctx.rel_path.parent == PurePosixPath("."):
+            return ctx.rel_path
+
+        exile_base = (
+            ctx.anchor_parent
+            if has_ancestor
+            else (
+                PurePosixPath()
+                if ctx.rel_path.parent == PurePosixPath(".")
+                else ctx.anchor_parent.parent
+            )
+        )
+        raw_dest = exile_base / target if target else exile_base
+        return self._combine(normalize_posix_path(raw_dest), ctx.sub_path)
+
+
+DEFAULT_REMAP_STRATEGIES: tuple[IRemapStrategy, ...] = (
+    PreserveHierarchyRemapStrategy(),
+    ArchiveRootRemapStrategy(),
+    LocalScopeRemapStrategy(),
+    ParentClimbRemapStrategy(),
+    ExileRemapStrategy(),
+)
+
+
+# ==============================================================================
+# 3. Path Evaluator (Bridge with Rule Transitions & Remap Strategies)
+# ==============================================================================
+class PathEvaluator(IPathEvaluator):
     """Evaluates relative paths against compiled .zipignore rules with hierarchical phagocytosis."""
 
     rules: tuple[IgnoreRule, ...]
+    transitions: Mapping[RuleKind, IRuleTransition]
+    remap_strategies: Sequence[IRemapStrategy]
 
     def __init__(
         self,
         rules: Sequence[IgnoreRule | str | ScopedRule] = (),
-        interpreter: RuleInterpreter | None = None,
+        interpreter: IRuleInterpreter | None = None,
+        transitions: Mapping[RuleKind, IRuleTransition] | None = None,
+        remap_strategies: Sequence[IRemapStrategy] | None = None,
     ) -> None:
         if all(isinstance(r, IgnoreRule) for r in rules):
             self.rules = tuple(r for r in rules if isinstance(r, IgnoreRule))
         else:
             compiler = interpreter or RuleInterpreter()
             self.rules = compiler.compile_all(rules)
+        self.transitions = transitions if transitions is not None else DEFAULT_RULE_TRANSITIONS
+        self.remap_strategies = (
+            remap_strategies if remap_strategies is not None else DEFAULT_REMAP_STRATEGIES
+        )
 
     def evaluate(self, rel_path: PurePosixPath, is_dir: bool = False) -> EvaluationResult:
         """Evaluate path against rules, returning EvaluationResult(is_excluded, arc_path, matched_rule)."""
-        status = self._evaluate_ancestors(rel_path.parts)
-        is_excluded, excluded_by, rescued_by = self._evaluate_target(rel_path, is_dir, status)
+        state = self._evaluate_ancestors(rel_path.parts)
+        self._evaluate_target(rel_path, is_dir, state)
 
-        if is_excluded:
-            return EvaluationResult(True, None, excluded_by)
-        if rescued_by is None:
+        if state.is_excluded:
+            return EvaluationResult(True, None, state.excluded_by)
+        if state.rescued_by is None:
             return EvaluationResult(False, rel_path, None)
 
-        arc_rel = self._remap_path(rel_path, rescued_by, status.shallowest_excluded_ancestor)
-        return EvaluationResult(False, arc_rel, rescued_by)
+        arc_rel = self._remap_path(rel_path, state.rescued_by, state.shallowest_excluded_ancestor)
+        return EvaluationResult(False, arc_rel, state.rescued_by)
 
     def should_prune(self, rel_dir: PurePosixPath) -> bool:
         """Check if an excluded directory has any active rescue rules that could target its contents."""
@@ -87,48 +317,27 @@ class PathEvaluator:
 
         return True
 
-    def _evaluate_ancestors(self, parts: tuple[str, ...]) -> _AncestorStatus:
-        status = _AncestorStatus()
+    def _evaluate_ancestors(self, parts: tuple[str, ...]) -> EvaluationState:
+        state = EvaluationState()
         for k in range(1, len(parts)):
             anc = PurePosixPath(*parts[:k])
             anc_str = anc.as_posix()
             for r in self.rules:
                 match_str = self._scoped_target(anc, anc_str, r.scope)
                 if match_str is not None and r.regex.search(match_str):
-                    status.apply(anc, r)
-        return status
+                    self.transitions[r.kind].apply(state, r, ancestor=anc)
+        return state
 
     def _evaluate_target(
-        self, rel_path: PurePosixPath, is_dir: bool, status: _AncestorStatus
-    ) -> tuple[bool, IgnoreRule | None, IgnoreRule | None]:
+        self, rel_path: PurePosixPath, is_dir: bool, state: EvaluationState
+    ) -> None:
         posix_str = rel_path.as_posix()
-        is_excluded = status.is_excluded
-        matched = status.matched_rule
-        rescued_by = matched if (matched and matched.kind == RuleKind.RESCUE) else None
-        excluded_by = matched if is_excluded else None
-
         for r in self.rules:
             if r.is_dir_only and not is_dir:
                 continue
             target_str = self._scoped_target(rel_path, posix_str, r.scope)
-            if target_str is None or not r.regex.search(target_str):
-                continue
-
-            if r.kind == RuleKind.RESCUE:
-                rescued_by = r
-                excluded_by = None
-                is_excluded = False
-            elif r.kind == RuleKind.REDELETE:
-                if self._redelete_matches_rescue(r.target, rescued_by):
-                    rescued_by = None
-                    excluded_by = r
-                    is_excluded = True
-            else:
-                excluded_by = r
-                rescued_by = None
-                is_excluded = True
-
-        return is_excluded, excluded_by, rescued_by
+            if target_str is not None and r.regex.search(target_str):
+                self.transitions[r.kind].apply(state, r)
 
     def _remap_path(
         self,
@@ -136,17 +345,7 @@ class PathEvaluator:
         rescued_by: IgnoreRule,
         shallowest_excluded_ancestor: PurePosixPath | None,
     ) -> PurePosixPath:
-        """Resolve destination archive path using 3-tier prefix semantics:
-        - `/` (`/!`, `/{to}!`): Archive-root coordinate
-        - `.` / `./` / `..` / `../` (`./!`, `./{to}!`, `../!`): Source hierarchy / local scope coordinate
-        - omitted (`!`, `{to}!`): Exile destination (`shallowest_excluded_ancestor.parent`) coordinate
-        """
-        target = rescued_by.target
-        scope = rescued_by.scope
-        if target in (".", "./"):
-            return rel_path
-
-        has_ancestor = shallowest_excluded_ancestor is not None
+        """Dispatch destination archive path calculation to the matching 3-tier IRemapStrategy."""
         sub_path = (
             rel_path.relative_to(shallowest_excluded_ancestor)
             if shallowest_excluded_ancestor is not None
@@ -157,77 +356,17 @@ class PathEvaluator:
             if shallowest_excluded_ancestor is not None
             else rel_path.parent
         )
-
-        if target.startswith("/"):
-            dest_dir = self._normalize_posix(PurePosixPath(target.lstrip("/")))
-        elif target.startswith("./"):
-            rel_sub = target.removeprefix("./").strip("/")
-            preserved_base = (
-                scope
-                if scope != PurePosixPath()
-                else (
-                    shallowest_excluded_ancestor
-                    if shallowest_excluded_ancestor is not None
-                    else rel_path.parent
-                )
-            )
-            dest_dir = (
-                self._normalize_posix(preserved_base / rel_sub)
-                if rel_sub
-                else self._normalize_posix(preserved_base)
-            )
-        elif target in ("..", "../") or target.startswith("../"):
-            dest_dir = self._climb_from_anchor(anchor_parent, target)
-        else:
-            if not has_ancestor and not target and rel_path.parent == PurePosixPath("."):
-                return rel_path
-            exile_base = (
-                anchor_parent
-                if has_ancestor
-                else (
-                    PurePosixPath()
-                    if rel_path.parent == PurePosixPath(".")
-                    else anchor_parent.parent
-                )
-            )
-            dest_dir = (
-                self._normalize_posix(exile_base / target)
-                if target
-                else self._normalize_posix(exile_base)
-            )
-
-        if dest_dir == PurePosixPath("."):
-            dest_dir = PurePosixPath()
-        return dest_dir / sub_path if dest_dir != PurePosixPath() else sub_path
-
-    def _climb_from_anchor(self, anchor_parent: PurePosixPath, target: str) -> PurePosixPath:
-        """Climb N parent levels for each leading '..' segment and append any trailing subpath."""
-        current = PurePosixPath() if anchor_parent == PurePosixPath(".") else anchor_parent
-        parts = [p for p in target.split("/") if p and p != "."]
-        idx = 0
-        while idx < len(parts) and parts[idx] == "..":
-            current = (
-                PurePosixPath()
-                if current in (PurePosixPath(), PurePosixPath("."))
-                else current.parent
-            )
-            idx += 1
-        remainder = PurePosixPath(*parts[idx:]) if idx < len(parts) else PurePosixPath()
-        combined = current / remainder if remainder != PurePosixPath() else current
-        return self._normalize_posix(combined)
-
-    def _normalize_posix(self, path: PurePosixPath) -> PurePosixPath:
-        """Resolve '.' and '..' segments within a relative PurePosixPath."""
-        stack: list[str] = []
-        for part in path.parts:
-            if part in ("", "."):
-                continue
-            if part == "..":
-                if stack:
-                    stack.pop()
-            else:
-                stack.append(part)
-        return PurePosixPath(*stack) if stack else PurePosixPath()
+        ctx = RemapContext(
+            rel_path=rel_path,
+            rescued_by=rescued_by,
+            shallowest_excluded_ancestor=shallowest_excluded_ancestor,
+            sub_path=sub_path,
+            anchor_parent=anchor_parent,
+        )
+        for strategy in self.remap_strategies:
+            if strategy.matches(rescued_by.target):
+                return strategy.remap(ctx)
+        return rel_path
 
     def _scoped_target(
         self, path: PurePosixPath, posix_str: str, scope: PurePosixPath
@@ -237,11 +376,6 @@ class PathEvaluator:
         if not path.is_relative_to(scope) or path == scope:
             return None
         return path.relative_to(scope).as_posix()
-
-    def _redelete_matches_rescue(self, redelete_target: str, rescued_by: IgnoreRule | None) -> bool:
-        return redelete_matches_rescue(
-            redelete_target, rescued_by.target if rescued_by is not None else None
-        )
 
 
 def evaluate_path(
