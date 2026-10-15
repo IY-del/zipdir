@@ -1,4 +1,4 @@
-"""Unit tests verifying module separation of interfaces.py vs concrete modules, D* invariants, I*/M*, and Strategy/Bridge."""
+"""Unit tests verifying interfaces/ package separation, progressive inheritance (OCP), TemplateMethod decomposition, D* invariants, and Strategy/Bridge patterns."""
 
 import ast
 import inspect
@@ -8,16 +8,38 @@ from pathlib import Path, PurePosixPath
 import pytest
 from pydantic import ValidationError
 
-import zipdir.evaluator
-import zipdir.glob
-import zipdir.interfaces
-import zipdir.interpreter
+import zipdir.evaluator.base
+import zipdir.evaluator.pruning
+import zipdir.evaluator.remapped
+import zipdir.evaluator.strategies
+import zipdir.glob.base
+import zipdir.glob.gitignore
+import zipdir.interfaces.evaluator
+import zipdir.interfaces.glob
+import zipdir.interfaces.interpreter
+import zipdir.interfaces.models
+import zipdir.interfaces.output
+import zipdir.interfaces.packager
+import zipdir.interfaces.presets
+import zipdir.interfaces.ui
+import zipdir.interpreter.base
+import zipdir.interpreter.squeezed
+import zipdir.interpreter.strategies
 import zipdir.models
-import zipdir.output
-import zipdir.packager
-import zipdir.presets
-import zipdir.squeezer
-import zipdir.ui
+import zipdir.output.base
+import zipdir.output.fallback
+import zipdir.output.strategies
+import zipdir.packager.atomic
+import zipdir.packager.base
+import zipdir.packager.phagocytic
+import zipdir.packager.pruned
+import zipdir.packager.writers
+import zipdir.presets.base
+import zipdir.presets.cascade
+import zipdir.presets.linearized
+import zipdir.presets.local
+import zipdir.ui.base
+import zipdir.ui.verbose
 from zipdir import (
     ArchiveRootRemapStrategy,
     ConsoleReporter,
@@ -78,36 +100,57 @@ from zipdir import (
 )
 
 
-class TestInterfaceConcreteModuleSeparation:
-    """Verifies that interfaces.py and concrete modules are strictly separated (DIP Section 3.5)."""
+class TestInterfacesDirectoryAndProgressiveInheritance:
+    """Verifies dedicated interfaces/ directory separation and progressive inheritance (Sections 3.2, 3.4, 3.5, 4.6, 8.1)."""
 
-    def test_interfaces_module_has_zero_concrete_dependencies(self) -> None:
-        """interfaces.py must not import any zipdir.* module."""
-        source = inspect.getsource(zipdir.interfaces)
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert not alias.name.startswith("zipdir"), (
-                        f"interfaces.py must not import {alias.name}"
+    def test_interfaces_package_files_are_separated_and_import_no_concretes(self) -> None:
+        """All interfaces reside under zipdir/interfaces/*.py and never import concrete modules."""
+        interface_modules = [
+            zipdir.interfaces.models,
+            zipdir.interfaces.glob,
+            zipdir.interfaces.interpreter,
+            zipdir.interfaces.evaluator,
+            zipdir.interfaces.output,
+            zipdir.interfaces.presets,
+            zipdir.interfaces.ui,
+            zipdir.interfaces.packager,
+        ]
+        for mod in interface_modules:
+            source = inspect.getsource(mod)
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("zipdir."):
+                    assert node.module.startswith("zipdir.interfaces."), (
+                        f"{mod.__name__} must only import from zipdir.interfaces.*, got {node.module}"
                     )
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                assert not node.module.startswith("zipdir"), (
-                    f"interfaces.py must not import from {node.module}"
-                )
 
-    def test_concrete_modules_do_not_define_interfaces(self) -> None:
-        """Concrete modules must not define D*, I*, or M* interface classes."""
+    def test_concrete_directories_contain_no_interface_definitions(self) -> None:
+        """Concrete feature directories must not define D*, I*, or M* interface classes."""
         concrete_modules = [
             zipdir.models,
-            zipdir.glob,
-            zipdir.interpreter,
-            zipdir.squeezer,
-            zipdir.evaluator,
-            zipdir.output,
-            zipdir.presets,
-            zipdir.ui,
-            zipdir.packager,
+            zipdir.glob.base,
+            zipdir.glob.gitignore,
+            zipdir.interpreter.base,
+            zipdir.interpreter.squeezed,
+            zipdir.interpreter.strategies,
+            zipdir.evaluator.base,
+            zipdir.evaluator.remapped,
+            zipdir.evaluator.pruning,
+            zipdir.evaluator.strategies,
+            zipdir.output.base,
+            zipdir.output.fallback,
+            zipdir.output.strategies,
+            zipdir.presets.base,
+            zipdir.presets.linearized,
+            zipdir.presets.local,
+            zipdir.presets.cascade,
+            zipdir.ui.base,
+            zipdir.ui.verbose,
+            zipdir.packager.base,
+            zipdir.packager.pruned,
+            zipdir.packager.phagocytic,
+            zipdir.packager.atomic,
+            zipdir.packager.writers,
         ]
         for mod in concrete_modules:
             source = inspect.getsource(mod)
@@ -115,27 +158,128 @@ class TestInterfaceConcreteModuleSeparation:
             for node in tree.body:
                 if isinstance(node, ast.ClassDef):
                     assert not node.name.startswith(("I", "D", "M")), (
-                        f"Interface/contract {node.name} must reside in interfaces.py, not {mod.__name__}"
+                        f"Interface/contract {node.name} must reside in zipdir/interfaces/, not {mod.__name__}"
                     )
 
-    def test_high_level_concrete_modules_depend_only_on_interfaces_and_models(self) -> None:
-        """High-level concrete modules (packager, presets, evaluator, interpreter) must not import sibling concrete modules."""
-        for mod in (
-            zipdir.glob,
-            zipdir.interpreter,
-            zipdir.evaluator,
-            zipdir.output,
-            zipdir.presets,
-            zipdir.ui,
-            zipdir.packager,
-        ):
-            source = inspect.getsource(mod)
-            tree = ast.parse(source)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("zipdir."):
-                    assert node.module in ("zipdir.interfaces", "zipdir.models"), (
-                        f"{mod.__name__} directly imports concrete module {node.module}, violating DIP"
-                    )
+    def test_cross_package_imports_target_only_interfaces_or_models(self) -> None:
+        """Concrete files in package A must never import concrete files from package B (DIP)."""
+        package_concrete_groups = {
+            "glob": [zipdir.glob.base, zipdir.glob.gitignore],
+            "interpreter": [
+                zipdir.interpreter.base,
+                zipdir.interpreter.squeezed,
+                zipdir.interpreter.strategies,
+            ],
+            "evaluator": [
+                zipdir.evaluator.base,
+                zipdir.evaluator.remapped,
+                zipdir.evaluator.pruning,
+                zipdir.evaluator.strategies,
+            ],
+            "output": [
+                zipdir.output.base,
+                zipdir.output.fallback,
+                zipdir.output.strategies,
+            ],
+            "presets": [
+                zipdir.presets.base,
+                zipdir.presets.linearized,
+                zipdir.presets.local,
+                zipdir.presets.cascade,
+            ],
+            "ui": [zipdir.ui.base, zipdir.ui.verbose],
+            "packager": [
+                zipdir.packager.base,
+                zipdir.packager.pruned,
+                zipdir.packager.phagocytic,
+                zipdir.packager.atomic,
+                zipdir.packager.writers,
+            ],
+        }
+        for pkg_name, mods in package_concrete_groups.items():
+            own_prefix = f"zipdir.{pkg_name}."
+            for mod in mods:
+                source = inspect.getsource(mod)
+                tree = ast.parse(source)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("zipdir."):
+                        if node.module.startswith(own_prefix):
+                            continue
+                        assert node.module == "zipdir.models" or node.module.startswith("zipdir.interfaces"), (
+                            f"{mod.__name__} directly imports external concrete module {node.module}"
+                        )
+
+    def test_progressive_inheritance_chains_and_ocp_decomposition(self) -> None:
+        """Verifies progressive inheritance chains and TemplateMethod decomposition across all packages."""
+        # 1. glob: gitignore.GlobExpression -> base.GlobExpression -> IGlobCompiler
+        assert GlobExpression is zipdir.glob.gitignore.GlobExpression
+        assert issubclass(zipdir.glob.gitignore.GlobExpression, zipdir.glob.base.GlobExpression)
+        assert issubclass(zipdir.glob.base.GlobExpression, IGlobCompiler)
+
+        # 2. interpreter: squeezed.RuleInterpreter -> base.RuleInterpreter -> IRuleInterpreter
+        assert RuleInterpreter is zipdir.interpreter.squeezed.RuleInterpreter
+        assert issubclass(
+            zipdir.interpreter.squeezed.RuleInterpreter,
+            zipdir.interpreter.base.RuleInterpreter,
+        )
+        assert issubclass(zipdir.interpreter.base.RuleInterpreter, IRuleInterpreter)
+
+        # 3. evaluator: pruning -> remapped -> base -> IPathEvaluator
+        assert PathEvaluator is zipdir.evaluator.pruning.PathEvaluator
+        assert issubclass(
+            zipdir.evaluator.pruning.PathEvaluator,
+            zipdir.evaluator.remapped.PathEvaluator,
+        )
+        assert issubclass(
+            zipdir.evaluator.remapped.PathEvaluator,
+            zipdir.evaluator.base.PathEvaluator,
+        )
+        assert issubclass(zipdir.evaluator.base.PathEvaluator, IPathEvaluator)
+
+        # 4. output: fallback -> base -> IOutputResolver
+        assert OutputResolver is zipdir.output.fallback.OutputResolver
+        assert issubclass(
+            zipdir.output.fallback.OutputResolver,
+            zipdir.output.base.OutputResolver,
+        )
+        assert issubclass(zipdir.output.base.OutputResolver, IOutputResolver)
+
+        # 5. presets: cascade -> local -> linearized -> base -> IPresetCatalog
+        assert PresetCatalog is zipdir.presets.cascade.PresetCatalog
+        assert issubclass(
+            zipdir.presets.cascade.PresetCatalog,
+            zipdir.presets.local.PresetCatalog,
+        )
+        assert issubclass(
+            zipdir.presets.local.PresetCatalog,
+            zipdir.presets.linearized.PresetCatalog,
+        )
+        assert issubclass(
+            zipdir.presets.linearized.PresetCatalog,
+            zipdir.presets.base.PresetCatalog,
+        )
+        assert issubclass(zipdir.presets.base.PresetCatalog, IPresetCatalog)
+
+        # 6. ui: verbose -> base -> IReporter
+        assert ConsoleReporter is zipdir.ui.verbose.ConsoleReporter
+        assert issubclass(zipdir.ui.verbose.ConsoleReporter, zipdir.ui.base.ConsoleReporter)
+        assert issubclass(zipdir.ui.base.ConsoleReporter, IReporter)
+
+        # 7. packager: atomic -> phagocytic -> pruned -> base -> IPackager
+        assert ZipPackager is zipdir.packager.atomic.ZipPackager
+        assert issubclass(
+            zipdir.packager.atomic.ZipPackager,
+            zipdir.packager.phagocytic.ZipPackager,
+        )
+        assert issubclass(
+            zipdir.packager.phagocytic.ZipPackager,
+            zipdir.packager.pruned.ZipPackager,
+        )
+        assert issubclass(
+            zipdir.packager.pruned.ZipPackager,
+            zipdir.packager.base.ZipPackager,
+        )
+        assert issubclass(zipdir.packager.base.ZipPackager, IPackager)
 
 
 class TestDataModelInvariants:
