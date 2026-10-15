@@ -1,8 +1,7 @@
-"""Concrete domain data models and value helpers for zipdir."""
+"""Concrete domain data models and value helpers for zipdir using Pydantic."""
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 
@@ -61,35 +60,80 @@ def normalize_posix_path(path: PurePosixPath) -> PurePosixPath:
     return PurePosixPath(*stack) if stack else PurePosixPath()
 
 
-@dataclass(frozen=True)
-class ParsedRule:
+class ParsedRule(BaseModel):
     """AST representation for an interpreted .zipignore rule."""
 
+    model_config = ConfigDict(frozen=True)
+
     kind: RuleKind
-    target: str
+    target: str = ""
     pattern: str
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        kind: RuleKind | None = None,
+        target: str = "",
+        pattern: str = "",
+        **data: object,
+    ) -> None:
+        if kind is not None:
+            data.setdefault("kind", kind)
+        if target:
+            data.setdefault("target", target)
+        if pattern:
+            data.setdefault("pattern", pattern)
+        super().__init__(**data)
+
+    def model_post_init(self, __context: object) -> None:
         if not self.pattern:
             raise ValueError("ParsedRule invariant violated: pattern must be non-empty")
         if "?" in self.target:
             raise ValueError("ParsedRule invariant violated: '?' is prohibited in target")
 
 
-@dataclass(frozen=True)
-class IgnoreRule:
+class IgnoreRule(BaseModel):
     """Compiled .zipignore rule with optional rescue / remapping target."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     raw: str
     kind: RuleKind
-    target: str
+    target: str = ""
     pattern: str
     regex: re.Pattern[str]
     is_dir_only: bool
     has_slash: bool
-    scope: PurePosixPath = PurePosixPath()
+    scope: PurePosixPath = Field(default_factory=PurePosixPath)
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        raw: str | None = None,
+        kind: RuleKind | None = None,
+        target: str = "",
+        pattern: str = "",
+        regex: re.Pattern[str] | None = None,
+        is_dir_only: bool = False,
+        has_slash: bool = False,
+        scope: PurePosixPath | None = None,
+        **data: object,
+    ) -> None:
+        if raw is not None:
+            data.setdefault("raw", raw)
+        if kind is not None:
+            data.setdefault("kind", kind)
+        if target:
+            data.setdefault("target", target)
+        if pattern:
+            data.setdefault("pattern", pattern)
+        if regex is not None:
+            data.setdefault("regex", regex)
+        data.setdefault("is_dir_only", is_dir_only)
+        data.setdefault("has_slash", has_slash)
+        if scope is not None:
+            data.setdefault("scope", scope)
+        super().__init__(**data)
+
+    def model_post_init(self, __context: object) -> None:
         if not self.pattern:
             raise ValueError("IgnoreRule invariant violated: pattern must be non-empty")
         if "?" in self.target:
@@ -98,15 +142,29 @@ class IgnoreRule:
             raise ValueError("IgnoreRule invariant violated: scope must be a relative path")
 
 
-@dataclass(frozen=True)
-class EvaluationResult:
+class EvaluationResult(BaseModel):
     """Outcome of evaluating a path against a compiled rule set."""
 
-    is_excluded: bool
-    arc_path: PurePosixPath | None
-    matched_rule: IgnoreRule | None
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    def __post_init__(self) -> None:
+    is_excluded: bool
+    arc_path: PurePosixPath | None = None
+    matched_rule: IgnoreRule | None = None
+
+    def __init__(
+        self,
+        is_excluded: bool | None = None,
+        arc_path: PurePosixPath | None = None,
+        matched_rule: IgnoreRule | None = None,
+        **data: object,
+    ) -> None:
+        if is_excluded is not None:
+            data.setdefault("is_excluded", is_excluded)
+        data.setdefault("arc_path", arc_path)
+        data.setdefault("matched_rule", matched_rule)
+        super().__init__(**data)
+
+    def model_post_init(self, __context: object) -> None:
         match (self.is_excluded, self.arc_path):
             case (True, PurePosixPath()):
                 raise ValueError(
@@ -125,16 +183,34 @@ class EvaluationResult:
         yield self.matched_rule
 
 
-@dataclass(frozen=True)
-class ResolvedOutput:
+class ResolvedOutput(BaseModel):
     """Resolved archive output path and collision metadata."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     path: Path
     explicit_zip: bool
     stem: str
     fell_back: bool = False
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        explicit_zip: bool | None = None,
+        stem: str = "",
+        fell_back: bool = False,
+        **data: object,
+    ) -> None:
+        if path is not None:
+            data.setdefault("path", path)
+        if explicit_zip is not None:
+            data.setdefault("explicit_zip", explicit_zip)
+        if stem:
+            data.setdefault("stem", stem)
+        data.setdefault("fell_back", fell_back)
+        super().__init__(**data)
+
+    def model_post_init(self, __context: object) -> None:
         match (self.explicit_zip, self.fell_back):
             case (True, True):
                 raise ValueError(

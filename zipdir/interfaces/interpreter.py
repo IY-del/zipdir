@@ -1,20 +1,22 @@
 """Interfaces for .zipignore rule interpretation and squeezing."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 from pathlib import PurePosixPath
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from zipdir.interfaces.glob import IGlobCompiler
 from zipdir.models import IgnoreRule, ParsedRule, RuleKind, ScopedRule
 
 
-@dataclass
-class SqueezeBuffer[T]:
+class SqueezeBuffer[T](BaseModel):
     """Mutable buffer state for compile-time rule squeezing."""
 
-    items: list[T] = field(default_factory=list)
-    parsed_meta: list[ParsedRule] = field(default_factory=list)
-    seen: dict[tuple[PurePosixPath, str], list[int]] = field(default_factory=dict)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    items: list[T] = Field(default_factory=list)
+    parsed_meta: list[ParsedRule] = Field(default_factory=list)
+    seen: dict[tuple[PurePosixPath, str], list[int]] = Field(default_factory=dict)
 
     def shift_indices(self, removed_idx: int) -> None:
         for indices in self.seen.values():
